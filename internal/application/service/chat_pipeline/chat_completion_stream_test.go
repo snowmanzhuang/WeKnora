@@ -2,6 +2,7 @@ package chatpipeline
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,13 @@ import (
 )
 
 type streamTestChatModel struct {
-	responses []types.StreamResponse
+	responses       []types.StreamResponse
+	streamSequences [][]types.StreamResponse
+	streamErrs      []error
+	streamCalls     int
+	chatResponses   []*types.ChatResponse
+	chatErrs        []error
+	chatCalls       int
 }
 
 func (m *streamTestChatModel) Chat(
@@ -24,6 +31,14 @@ func (m *streamTestChatModel) Chat(
 	[]chat.Message,
 	*chat.ChatOptions,
 ) (*types.ChatResponse, error) {
+	call := m.chatCalls
+	m.chatCalls++
+	if call < len(m.chatErrs) && m.chatErrs[call] != nil {
+		return nil, m.chatErrs[call]
+	}
+	if call < len(m.chatResponses) && m.chatResponses[call] != nil {
+		return m.chatResponses[call], nil
+	}
 	return nil, nil
 }
 
@@ -32,8 +47,17 @@ func (m *streamTestChatModel) ChatStream(
 	[]chat.Message,
 	*chat.ChatOptions,
 ) (<-chan types.StreamResponse, error) {
-	ch := make(chan types.StreamResponse, len(m.responses))
-	for _, response := range m.responses {
+	call := m.streamCalls
+	m.streamCalls++
+	if call < len(m.streamErrs) && m.streamErrs[call] != nil {
+		return nil, m.streamErrs[call]
+	}
+	responses := m.responses
+	if call < len(m.streamSequences) {
+		responses = m.streamSequences[call]
+	}
+	ch := make(chan types.StreamResponse, len(responses))
+	for _, response := range responses {
 		ch <- response
 	}
 	close(ch)
@@ -122,6 +146,96 @@ func TestChatCompletionStreamClosedWithoutDoneEmitsTerminalError(t *testing.T) {
 	}
 }
 
+func TestChatCompletionRetriesTransientError(t *testing.T) {
+	disableChatRetrySleep(t)
+	model := &streamTestChatModel{
+		chatErrs: []error{
+			errors.New("API request failed with status 503: service unavailable"),
+		},
+		chatResponses: []*types.ChatResponse{
+			nil,
+			{Content: "重试后答案", FinishReason: "stop"},
+		},
+	}
+	plugin := &PluginChatCompletion{
+		modelService: &streamTestModelService{chatModel: model},
+	}
+	cm := testChatManage(nil)
+
+	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION, cm, func() *PluginError {
+		return nil
+	}); err != nil {
+		t.Fatalf("OnEvent returned error: %v", err)
+	}
+
+	if model.chatCalls != 2 {
+		t.Fatalf("Chat calls = %d, want 2", model.chatCalls)
+	}
+	if cm.ChatResponse == nil || cm.ChatResponse.Content != "重试后答案" {
+		t.Fatalf("ChatResponse = %#v, want retry response", cm.ChatResponse)
+	}
+}
+
+func TestChatCompletionDoesNotRetryPermanentError(t *testing.T) {
+	disableChatRetrySleep(t)
+	model := &streamTestChatModel{
+		chatErrs: []error{
+			errors.New("API request failed with status 403: forbidden"),
+		},
+	}
+	plugin := &PluginChatCompletion{
+		modelService: &streamTestModelService{chatModel: model},
+	}
+	cm := testChatManage(nil)
+
+	err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION, cm, func() *PluginError {
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("OnEvent returned nil error, want permanent model error")
+	}
+	if model.chatCalls != 1 {
+		t.Fatalf("Chat calls = %d, want 1", model.chatCalls)
+	}
+}
+
+func TestChatCompletionStreamRetriesTransientErrorBeforeOutput(t *testing.T) {
+	disableChatRetrySleep(t)
+	model := &streamTestChatModel{
+		streamSequences: [][]types.StreamResponse{
+			{
+				{
+					ResponseType: types.ResponseTypeError,
+					Content:      "API request failed with status 504: gateway timeout",
+					Done:         true,
+				},
+			},
+			{
+				{
+					ResponseType: types.ResponseTypeAnswer,
+					Content:      "重试后流式答案",
+					Done:         false,
+				},
+				{
+					ResponseType: types.ResponseTypeAnswer,
+					Done:         true,
+					FinishReason: "stop",
+				},
+			},
+		},
+	}
+
+	answer := runStreamPluginAndWaitForAnswer(t, model)
+
+	if model.streamCalls != 2 {
+		t.Fatalf("ChatStream calls = %d, want 2", model.streamCalls)
+	}
+	if answer != "重试后流式答案" {
+		t.Fatalf("answer = %q, want retry answer", answer)
+	}
+}
+
 func runStreamPluginAndWaitForError(
 	t *testing.T,
 	responses []types.StreamResponse,
@@ -144,22 +258,7 @@ func runStreamPluginAndWaitForError(
 			chatModel: &streamTestChatModel{responses: responses},
 		},
 	}
-	cm := &types.ChatManage{
-		PipelineRequest: types.PipelineRequest{
-			SessionID:   "session-1",
-			ChatModelID: "model-1",
-			Language:    "zh-CN",
-			SummaryConfig: types.SummaryConfig{
-				Prompt: "You are helpful.",
-			},
-		},
-		PipelineState: types.PipelineState{
-			UserContent: "你好",
-		},
-		PipelineContext: types.PipelineContext{
-			EventBus: bus.AsEventBusInterface(),
-		},
-	}
+	cm := testChatManage(bus.AsEventBusInterface())
 
 	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION_STREAM, cm, func() *PluginError {
 		return nil
@@ -173,5 +272,85 @@ func runStreamPluginAndWaitForError(
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for terminal error event")
 		return event.ErrorData{}
+	}
+}
+
+func runStreamPluginAndWaitForAnswer(
+	t *testing.T,
+	model *streamTestChatModel,
+) string {
+	t.Helper()
+
+	bus := event.NewEventBus()
+	answerCh := make(chan string, 1)
+	errorCh := make(chan event.ErrorData, 1)
+	var answer strings.Builder
+	bus.On(event.EventAgentFinalAnswer, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.AgentFinalAnswerData)
+		if !ok {
+			t.Fatalf("unexpected answer event data type %T", evt.Data)
+		}
+		answer.WriteString(data.Content)
+		if data.Done {
+			answerCh <- answer.String()
+		}
+		return nil
+	})
+	bus.On(event.EventError, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.ErrorData)
+		if !ok {
+			t.Fatalf("unexpected error event data type %T", evt.Data)
+		}
+		errorCh <- data
+		return nil
+	})
+
+	plugin := &PluginChatCompletionStream{
+		modelService: &streamTestModelService{chatModel: model},
+	}
+	cm := testChatManage(bus.AsEventBusInterface())
+
+	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION_STREAM, cm, func() *PluginError {
+		return nil
+	}); err != nil {
+		t.Fatalf("OnEvent returned error: %v", err)
+	}
+
+	select {
+	case answer := <-answerCh:
+		return answer
+	case errData := <-errorCh:
+		t.Fatalf("unexpected stream error: %#v", errData)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for final answer event")
+	}
+	return ""
+}
+
+func disableChatRetrySleep(t *testing.T) {
+	t.Helper()
+	original := chatCompletionRetrySleeper
+	chatCompletionRetrySleeper = func(context.Context, time.Duration) bool { return true }
+	t.Cleanup(func() {
+		chatCompletionRetrySleeper = original
+	})
+}
+
+func testChatManage(eventBus types.EventBusInterface) *types.ChatManage {
+	return &types.ChatManage{
+		PipelineRequest: types.PipelineRequest{
+			SessionID:   "session-1",
+			ChatModelID: "model-1",
+			Language:    "zh-CN",
+			SummaryConfig: types.SummaryConfig{
+				Prompt: "You are helpful.",
+			},
+		},
+		PipelineState: types.PipelineState{
+			UserContent: "你好",
+		},
+		PipelineContext: types.PipelineContext{
+			EventBus: eventBus,
+		},
 	}
 }

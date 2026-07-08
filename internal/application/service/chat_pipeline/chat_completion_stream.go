@@ -80,7 +80,23 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	pipelineInfo(ctx, "Stream", "model_call", map[string]interface{}{
 		"chat_model": chatManage.ChatModelID,
 	})
-	responseChan, err := chatModel.ChatStream(ctx, chatMessages, opt)
+	var responseChan <-chan types.StreamResponse
+	streamAttempt := 1
+	for ; streamAttempt <= chatCompletionMaxAttempts; streamAttempt++ {
+		responseChan, err = chatModel.ChatStream(ctx, chatMessages, opt)
+		if err == nil || !isRetryableChatModelError(ctx, err) || streamAttempt == chatCompletionMaxAttempts {
+			break
+		}
+		pipelineWarn(ctx, "Stream", "model_call_retry", map[string]interface{}{
+			"chat_model": chatManage.ChatModelID,
+			"attempt":    streamAttempt,
+			"max":        chatCompletionMaxAttempts,
+			"error":      err.Error(),
+		})
+		if !sleepBeforeChatRetry(ctx, streamAttempt) {
+			break
+		}
+	}
 	if err != nil {
 		pipelineError(ctx, "Stream", "model_call", map[string]interface{}{
 			"chat_model": chatManage.ChatModelID,
@@ -112,6 +128,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		var answerBuilder strings.Builder
 		answerDone := false
 		terminalErrorEmitted := false
+		outputStarted := false
 
 		closeThinking := func() {
 			if !thinkingOpen {
@@ -152,6 +169,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			})
 		}
 
+	streamLoop:
 		for {
 			select {
 			case <-ctx.Done():
@@ -172,6 +190,28 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 							"session_id": chatManage.SessionID,
 							"answer_len": answerBuilder.Len(),
 						})
+						if !outputStarted && streamAttempt < chatCompletionMaxAttempts {
+							if sleepBeforeChatRetry(ctx, streamAttempt) {
+								streamAttempt++
+								nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
+								if restartErr == nil && nextChan != nil {
+									responseChan = nextChan
+									pipelineWarn(ctx, "Stream", "channel_close_retry", map[string]interface{}{
+										"session_id": chatManage.SessionID,
+										"attempt":    streamAttempt,
+										"max":        chatCompletionMaxAttempts,
+									})
+									continue streamLoop
+								}
+								if restartErr != nil {
+									pipelineError(ctx, "Stream", "channel_close_retry_failed", map[string]interface{}{
+										"session_id": chatManage.SessionID,
+										"attempt":    streamAttempt,
+										"error":      restartErr.Error(),
+									})
+								}
+							}
+						}
 						emitTerminalError("chat_stream_closed", "model stream closed before sending a done event")
 					}
 					return
@@ -182,12 +222,39 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 						"session_id": chatManage.SessionID,
 						"error":      response.Content,
 					})
+					streamErr := errors.New(response.Content)
+					if !outputStarted && isRetryableChatModelError(ctx, streamErr) && streamAttempt < chatCompletionMaxAttempts {
+						if !sleepBeforeChatRetry(ctx, streamAttempt) {
+							emitTerminalError("chat_stream_error", response.Content)
+							return
+						}
+						streamAttempt++
+						nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
+						if restartErr == nil && nextChan != nil {
+							responseChan = nextChan
+							pipelineWarn(ctx, "Stream", "stream_error_retry", map[string]interface{}{
+								"session_id": chatManage.SessionID,
+								"attempt":    streamAttempt,
+								"max":        chatCompletionMaxAttempts,
+								"error":      response.Content,
+							})
+							continue streamLoop
+						}
+						if restartErr != nil {
+							pipelineError(ctx, "Stream", "stream_error_retry_failed", map[string]interface{}{
+								"session_id": chatManage.SessionID,
+								"attempt":    streamAttempt,
+								"error":      restartErr.Error(),
+							})
+						}
+					}
 					emitTerminalError("chat_stream_error", response.Content)
 					return
 				}
 
 				if response.ResponseType == types.ResponseTypeThinking {
 					if response.Content != "" {
+						outputStarted = true
 						thinkingOpen = true
 						eventBus.Emit(ctx, types.Event{
 							ID:        thinkingID,
@@ -208,6 +275,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				if response.ResponseType == types.ResponseTypeAnswer {
 					closeThinking()
 					if response.Content != "" {
+						outputStarted = true
 						answerBuilder.WriteString(response.Content)
 					}
 					if response.Done && strings.TrimSpace(answerBuilder.String()) == "" {
