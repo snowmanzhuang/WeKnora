@@ -1601,14 +1601,24 @@ func (s *Service) executeQARequest(req *qaRequest) {
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
+	replyContent, outboundImages := s.prepareIMDisplayContent(
+		ctx,
+		FormatIMDisplayContent(answer, StreamDisplayFinal),
+		req.tenant,
+		adapterSupportsImages(req.adapter),
+	)
+	if strings.TrimSpace(replyContent) == "" && len(outboundImages) > 0 {
+		replyContent = "已找到相关图片："
+	}
 	reply := &ReplyMessage{
-		Content: formatIMOutboundAnswer(ctx, answer, req.tenant, s.defaultFileSvc),
+		Content: replyContent,
 		IsFinal: true,
 	}
 	if err := req.adapter.SendReply(ctx, req.msg, reply); err != nil {
 		logger.Errorf(ctx, "[IM] Send reply failed: %v", err)
 		return
 	}
+	sendIMOutboundImages(ctx, req.adapter, req.msg, outboundImages)
 
 	logger.Infof(ctx, "[IM] Reply sent: channel=%s platform=%s user=%s answer_len=%d",
 		req.channelID, req.msg.Platform, req.msg.UserID, len(answer))
@@ -2396,8 +2406,16 @@ loop:
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	bufMu.Unlock()
 
-	finalDisplay := cleanIMContent(ctx, FormatIMFinalFromParts(parts), tenant, s.defaultFileSvc)
-	if noVisibleContent || finalDisplay == "" {
+	finalDisplay, outboundImages := s.prepareIMDisplayContent(
+		ctx,
+		FormatIMFinalFromParts(parts),
+		tenant,
+		adapterSupportsImages(adapter),
+	)
+	if strings.TrimSpace(finalDisplay) == "" && len(outboundImages) > 0 {
+		finalDisplay = "已找到相关图片："
+	}
+	if (noVisibleContent && len(outboundImages) == 0) || finalDisplay == "" {
 		fallback := "抱歉，我暂时无法回答这个问题。"
 		if finalErr != nil {
 			fallback = "抱歉，处理您的问题时出现了异常，请稍后再试。"
@@ -2420,6 +2438,7 @@ loop:
 	if err := streamer.EndStream(ctx, msg, streamID); err != nil {
 		logger.Warnf(ctx, "[IM] EndStream failed: %v", err)
 	}
+	sendIMOutboundImages(ctx, adapter, msg, outboundImages)
 
 	if answer == "" {
 		answer = "抱歉，我暂时无法回答这个问题。"
@@ -2443,7 +2462,20 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	return adapter.SendReply(ctx, msg, &ReplyMessage{Content: formatIMOutboundAnswer(ctx, answer, tenant, s.defaultFileSvc), IsFinal: true})
+	replyContent, outboundImages := s.prepareIMDisplayContent(
+		ctx,
+		FormatIMDisplayContent(answer, StreamDisplayFinal),
+		tenant,
+		adapterSupportsImages(adapter),
+	)
+	if strings.TrimSpace(replyContent) == "" && len(outboundImages) > 0 {
+		replyContent = "已找到相关图片："
+	}
+	if err := adapter.SendReply(ctx, msg, &ReplyMessage{Content: replyContent, IsFinal: true}); err != nil {
+		return err
+	}
+	sendIMOutboundImages(ctx, adapter, msg, outboundImages)
+	return nil
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.

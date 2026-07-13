@@ -56,7 +56,22 @@ func (p *PluginChatCompletion) OnEvent(
 	pipelineInfo(ctx, "Completion", "model_call", map[string]interface{}{
 		"chat_model": chatManage.ChatModelID,
 	})
-	chatResponse, err := chatModel.Chat(ctx, chatMessages, opt)
+	var chatResponse *types.ChatResponse
+	for attempt := 1; attempt <= chatCompletionMaxAttempts; attempt++ {
+		chatResponse, err = chatModel.Chat(ctx, chatMessages, opt)
+		if err == nil || !isRetryableChatModelError(ctx, err) || attempt == chatCompletionMaxAttempts {
+			break
+		}
+		pipelineWarn(ctx, "Completion", "model_call_retry", map[string]interface{}{
+			"chat_model": chatManage.ChatModelID,
+			"attempt":    attempt,
+			"max":        chatCompletionMaxAttempts,
+			"error":      err.Error(),
+		})
+		if !sleepBeforeChatRetry(ctx, attempt) {
+			break
+		}
+	}
 	if err != nil {
 		pipelineError(ctx, "Completion", "model_call", map[string]interface{}{
 			"chat_model": chatManage.ChatModelID,

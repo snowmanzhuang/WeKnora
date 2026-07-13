@@ -320,6 +320,21 @@ export async function listSystemAdmins(
   return response as unknown as ListSystemAdminsResponse
 }
 
+export interface ResetUserPasswordRequest {
+  email: string
+  new_password: string
+}
+
+/**
+ * Replace another user's password and revoke all of their active sessions.
+ * The backend route is restricted to SystemAdmin callers and rejects attempts
+ * to reset the caller's own password.
+ */
+export async function resetUserPassword(req: ResetUserPasswordRequest): Promise<{ message: string }> {
+  const response = await post('/api/v1/system/admin/users/reset-password', req)
+  return response as unknown as { message: string }
+}
+
 // ---- System Settings (P1) ----
 
 /**
@@ -473,4 +488,80 @@ export async function listSystemAuditLog(
   const tail = qs.toString()
   const url = `/api/v1/system/admin/audit-log${tail ? '?' + tail : ''}`
   return (await get(url)) as unknown as ListAuditLogResponse
+}
+
+// ---- Runtime queue observability (system-scope) ----
+
+/**
+ * QueueStat mirrors types.QueueStat on the backend: a read-only depth
+ * snapshot of one asynq queue. `pool` identifies the independent worker pool;
+ * `weight` is the queue's scheduling weight within that pool.
+ * Counts follow asynq.QueueInfo semantics — `active` is the number of
+ * tasks currently being processed (the closest thing to "workers busy"),
+ * `pending` is the backlog waiting to be picked up.
+ */
+export interface QueueStat {
+  name: string
+  pool: string
+  weight: number
+  size: number
+  pending: number
+  active: number
+  scheduled: number
+  retry: number
+  archived: number
+  completed: number
+  processed: number
+  failed: number
+  paused: boolean
+  latency_ms: number
+  memory_usage_bytes: number
+}
+
+export interface RuntimeWorkerPool {
+  name: string
+  concurrency: number
+  queue_count: number
+  instances: number
+  cluster_capacity: number
+  active: number
+  utilization: number
+}
+
+export interface ModelRuntimeStat {
+  model_id: string
+  name: string
+  active: number
+  waiting: number
+  limit: number
+}
+
+/**
+ * Runtime queue dashboard payload. `available` is false in Lite mode
+ * (no Redis/asynq) — render an "unavailable in this deployment" state
+ * rather than an empty table. Each pool includes both configured per-process
+ * concurrency and live cluster capacity/active workers aggregated from asynq
+ * server heartbeats.
+ */
+export interface RuntimeQueuesResponse {
+  available: boolean
+  upstream_concurrency: number
+  parse_concurrency: number
+  wiki_concurrency: number
+  pools: RuntimeWorkerPool[]
+  queues: QueueStat[]
+  model_limiter_available: boolean
+  models: ModelRuntimeStat[]
+  timestamp: number
+}
+
+/**
+ * Fetch the live asynq queue depths + worker-pool concurrency.
+ * Backend: GET /api/v1/system/admin/runtime/queues (SystemAdmin only).
+ * Returns the object directly — no {data: ...} wrapping (see
+ * utils/request.ts interceptor).
+ */
+export async function getRuntimeQueues(): Promise<RuntimeQueuesResponse> {
+  const response = await get('/api/v1/system/admin/runtime/queues')
+  return response as unknown as RuntimeQueuesResponse
 }

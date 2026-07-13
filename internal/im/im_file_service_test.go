@@ -13,6 +13,7 @@ import (
 
 // stubIMFileService implements interfaces.FileService for IM resolver tests.
 type stubIMFileService struct {
+	getFile    func(ctx context.Context, filePath string) (io.ReadCloser, error)
 	getFileURL func(ctx context.Context, filePath string) (string, error)
 }
 
@@ -26,7 +27,10 @@ func (s *stubIMFileService) SaveBytes(context.Context, []byte, uint64, string, b
 	return "", nil
 }
 
-func (s *stubIMFileService) GetFile(context.Context, string) (io.ReadCloser, error) {
+func (s *stubIMFileService) GetFile(ctx context.Context, filePath string) (io.ReadCloser, error) {
+	if s.getFile != nil {
+		return s.getFile(ctx, filePath)
+	}
 	return nil, nil
 }
 

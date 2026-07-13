@@ -118,6 +118,13 @@ type ReplyMessage struct {
 	Extra map[string]string
 }
 
+// OutboundImage is an image that should be uploaded to an IM platform.
+type OutboundImage struct {
+	FileName string
+	Caption  string
+	Data     []byte
+}
+
 // Adapter is the interface every IM platform must implement.
 type Adapter interface {
 	// Platform returns the platform identifier.
@@ -156,6 +163,11 @@ type StreamSender interface {
 
 	// EndStream finalizes a streaming reply.
 	EndStream(ctx context.Context, incoming *IncomingMessage, streamID string) error
+}
+
+// ImageSender is an optional interface for adapters that can upload images.
+type ImageSender interface {
+	SendImage(ctx context.Context, incoming *IncomingMessage, image *OutboundImage) error
 }
 
 // FileDownloader is an optional interface that adapters can implement to support
