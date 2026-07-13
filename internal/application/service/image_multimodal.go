@@ -47,8 +47,16 @@ const (
 		"5. Output ONLY the extracted text content. Do NOT include any HTML tags, reasoning, or unrelated comments.\n" +
 		"6. If there is absolutely no recognizable text content in the image, reply ONLY with: No text content.\n" +
 		"</instructions>"
-	vlmCaptionPrompt = "Provide a brief and concise description of the main content of the image in Chinese"
 )
+
+func buildVLMCaptionPrompt(ctx context.Context, cfg types.VLMConfig) string {
+	language := strings.TrimSpace(cfg.DescriptionLanguage)
+	if language == "" {
+		language = types.LanguageNameFromContext(ctx)
+	}
+	prompt := fmt.Sprintf("Provide a brief and concise description of the main content of the image in %s.", language)
+	return types.AppendCustomPromptInstructions(prompt, cfg.CustomInstructions, "image_description")
+}
 
 // ImageMultimodalService handles image:multimodal asynq tasks.
 // It reads images from storage (via FileService for provider:// URLs),
@@ -243,6 +251,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		} else {
 			imgOut["ocr_prompt"] = "default"
 		}
+		prompt = types.AppendCustomPromptInstructions(prompt, vlmCfg.CustomInstructions, "image_ocr")
 
 		ocrText, ocrErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, prompt)
 		if ocrErr != nil {
@@ -262,7 +271,7 @@ func (s *ImageMultimodalService) Handle(ctx context.Context, task *asynq.Task) e
 		}
 	}
 
-	caption, capErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, vlmCaptionPrompt)
+	caption, capErr := vlmModel.Predict(ctx, [][]byte{imgBytes}, buildVLMCaptionPrompt(ctx, vlmCfg))
 	if capErr != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] Caption failed for %s: %v", payload.ImageURL, capErr)
 		imgOut["caption_error"] = capErr.Error()
@@ -510,6 +519,8 @@ func (s *ImageMultimodalService) resolveFileServiceForPayload(ctx context.Contex
 	}
 
 	baseDir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
+	logger.Infof(ctx, "[ImageMultimodal] resolving file service: tenant=%d provider=%q LOCAL_STORAGE_BASE_DIR=%q imageURL=%s",
+		payload.TenantID, provider, baseDir, payload.ImageURL)
 	fileSvc, _, svcErr := filesvc.NewFileServiceFromStorageConfig(provider, tenant.StorageEngineConfig, baseDir)
 	if svcErr != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] resolve file service failed (falling back to default): tenant=%d provider=%s err=%v",
@@ -614,7 +625,8 @@ func (s *ImageMultimodalService) enqueueKnowledgePostProcessTask(ctx context.Con
 		return
 	}
 
-	task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes, asynq.Queue("default"), asynq.MaxRetry(3))
+	task := asynq.NewTask(types.TypeKnowledgePostProcess, payloadBytes,
+		knowledgePostProcessTaskOptions()...)
 	if _, err := s.taskEnqueuer.Enqueue(task); err != nil {
 		logger.Warnf(ctx, "[ImageMultimodal] Failed to enqueue post process task for %s: %v", payload.KnowledgeID, err)
 	} else {

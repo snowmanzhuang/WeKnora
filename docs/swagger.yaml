@@ -109,6 +109,7 @@ definitions:
     - 2002
     - 2003
     - 2004
+    - 2005
     - 2100
     - 2101
     - 2102
@@ -133,6 +134,7 @@ definitions:
     - ErrTenantInactive
     - ErrTenantNameRequired
     - ErrTenantInvalidStatus
+    - ErrTenantCreationDisabled
     - ErrAgentMissingThinkingModel
     - ErrAgentMissingAllowedTools
     - ErrAgentInvalidMaxIterations
@@ -204,6 +206,19 @@ definitions:
         type: string
       tier:
         $ref: '#/definitions/github_com_Tencent_WeKnora_internal_infrastructure_chunker.StrategyTier'
+    type: object
+  github_com_Tencent_WeKnora_internal_models_limiter.RuntimeStat:
+    properties:
+      active:
+        type: integer
+      limit:
+        type: integer
+      model_id:
+        type: string
+      name:
+        type: string
+      waiting:
+        type: integer
     type: object
   github_com_Tencent_WeKnora_internal_types.APIPrincipalMode:
     enum:
@@ -278,6 +293,7 @@ definitions:
     - system.setting_changed
     - system.admin_promoted
     - system.admin_revoked
+    - system.user_password_reset
     type: string
     x-enum-varnames:
     - AuditActionMemberAdded
@@ -299,6 +315,7 @@ definitions:
     - AuditActionSystemSettingChanged
     - AuditActionSystemAdminPromoted
     - AuditActionSystemAdminRevoked
+    - AuditActionSystemUserPasswordReset
   github_com_Tencent_WeKnora_internal_types.AuditLog:
     properties:
       action:
@@ -418,6 +435,12 @@ definitions:
           the historical recursive splitter; "auto" lets a profiler pick between
           heading-aware, heuristic and recursive tiers; "heading" / "heuristic" /
           "recursive" pin the tier explicitly.
+        type: string
+      table_metadata_instructions:
+        description: |-
+          TableMetadataInstructions contains optional business guidance used when
+          generating searchable summaries for CSV/Excel tables. The system-owned
+          output contract remains fixed; these instructions only add domain context.
         type: string
       token_limit:
         description: |-
@@ -872,6 +895,11 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.ExtractConfig:
     properties:
+      custom_instructions:
+        description: |-
+          CustomInstructions adds domain-specific extraction guidance while the
+          system keeps ownership of the structured graph output protocol.
+        type: string
       enabled:
         type: boolean
       nodes:
@@ -2061,6 +2089,14 @@ definitions:
         type: object
       interface_type:
         type: string
+      max_concurrency:
+        description: |-
+          MaxConcurrency caps concurrent in-flight BACKGROUND (ingestion /
+          enrichment) calls to THIS specific model, keyed by model ID and shared
+          across all replicas. 0 (the default) means "fall back to the
+          process-wide model.max_concurrency". Interactive user-facing calls are
+          never gated. Only chat / vlm / embedding honour this (see limiter.Gate).
+        type: integer
       parameter_size:
         description: Ollama model parameter size (e.g., "7B", "13B", "70B")
         type: string
@@ -2087,6 +2123,7 @@ definitions:
     - siliconflow
     - jina
     - openrouter
+    - requesty
     - nvidia
     - novita
     - azure_openai
@@ -2106,6 +2143,7 @@ definitions:
       ModelSourceOpenAI: OpenAI model
       ModelSourceOpenRouter: OpenRouter model
       ModelSourceRemote: Remote model
+      ModelSourceRequesty: Requesty model
       ModelSourceSiliconFlow: SiliconFlow model
       ModelSourceVolcengine: Volcengine model
       ModelSourceZhipu: Zhipu model
@@ -2124,6 +2162,7 @@ definitions:
     - SiliconFlow model
     - Jina AI model
     - OpenRouter model
+    - Requesty model
     - NVIDIA model
     - Novita AI model
     - Azure OpenAI model
@@ -2142,6 +2181,7 @@ definitions:
     - ModelSourceSiliconFlow
     - ModelSourceJina
     - ModelSourceOpenRouter
+    - ModelSourceRequesty
     - ModelSourceNvidia
     - ModelSourceNovita
     - ModelSourceAzureOpenAI
@@ -2395,11 +2435,58 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.QuestionGenerationConfig:
     properties:
+      custom_instructions:
+        description: |-
+          CustomInstructions describes the intended audience or question style.
+          It is appended to the stable system question-generation template.
+        type: string
       enabled:
         type: boolean
       question_count:
         description: 'Number of questions to generate per chunk (default: 3, max:
           10)'
+        type: integer
+    type: object
+  github_com_Tencent_WeKnora_internal_types.QueueStat:
+    properties:
+      active:
+        type: integer
+      archived:
+        type: integer
+      completed:
+        type: integer
+      failed:
+        type: integer
+      latency_ms:
+        description: LatencyMs is the age of the oldest pending task, in milliseconds.
+        type: integer
+      memory_usage_bytes:
+        description: MemoryUsageBytes is the approximate Redis memory the queue occupies.
+        type: integer
+      name:
+        type: string
+      paused:
+        description: Paused reports whether the queue is paused (tasks not consumed).
+        type: boolean
+      pending:
+        type: integer
+      pool:
+        description: Pool is the independent worker pool that drains this queue.
+        type: string
+      processed:
+        description: Processed / Failed are today's counters (reset daily).
+        type: integer
+      retry:
+        type: integer
+      scheduled:
+        type: integer
+      size:
+        description: |-
+          Size is the total number of tasks in the queue (pending + active +
+          scheduled + retry + aggregating + archived).
+        type: integer
+      weight:
+        description: Weight is the queue's scheduling weight inside its pool.
         type: integer
     type: object
   github_com_Tencent_WeKnora_internal_types.RegisterRequest:
@@ -3333,6 +3420,16 @@ definitions:
       base_url:
         description: Base URL
         type: string
+      custom_instructions:
+        description: |-
+          CustomInstructions adds KB-specific image interpretation guidance without
+          replacing the system-owned OCR and Markdown output contract.
+        type: string
+      description_language:
+        description: |-
+          DescriptionLanguage controls the language used for generated image
+          captions. Empty means follow the document/request language.
+        type: string
       enabled:
         type: boolean
       interface_type:
@@ -3472,33 +3569,54 @@ definitions:
     - WebSearchProviderTypeKeenable
   github_com_Tencent_WeKnora_internal_types.WikiConfig:
     properties:
+      content_instructions:
+        description: |-
+          ContentInstructions controls tone, structure and emphasis for generated
+          summary/entity/index prose. Citation and merge rules remain system-owned.
+        type: string
       extraction_granularity:
         allOf:
         - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.WikiExtractionGranularity'
         description: |-
           ExtractionGranularity controls how many candidate slugs Pass 0 extracts
           per document. Empty / unknown value is treated as WikiExtractionStandard.
+      extraction_instructions:
+        description: |-
+          ExtractionInstructions tells candidate extraction which domain concepts
+          to emphasize without replacing the stable JSON/citation protocol.
+        type: string
       ingest_batch_size:
         description: |-
-          IngestBatchSize controls how many pending ops a single batch
-          processes before scheduling a follow-up. 0 falls back to the
-          hard-coded default (5). Operators on large KBs (4w+ docs) can
-          raise this to 10–20 to amortize the lock-acquire / index-rebuild
-          overhead across more documents per round.
+          IngestBatchSize controls how many pending ops a single batch claims and
+          processes before scheduling a follow-up. 0 falls back to the hard-coded
+          default (5). Larger batches amortize per-batch setup and let more docs
+          share the batch-internal Map/Reduce fan-out; smaller batches spread a
+          KB's backlog across more concurrent batches (finer scheduling grain).
         type: integer
       ingest_map_parallel:
         description: |-
           IngestMapParallel sets the errgroup limit for the Map phase
-          (per-document extraction + summary + chunk citation). 0 falls
-          back to 10. Bound by the LLM provider's concurrency limit and
-          the worker's outbound HTTP pool.
+          (per-document extraction + summary + chunk citation) WITHIN one batch.
+          0 falls back to 10. Bound by the LLM provider's concurrency limit and
+          the worker's outbound HTTP pool. Remember it multiplies with the number
+          of concurrent batches (IngestMaxInflight).
+        type: integer
+      ingest_max_inflight:
+        description: |-
+          IngestMaxInflight caps how many ingest batches for THIS KB may run
+          concurrently in the shared wiki worker pool (standard/Redis mode
+          only). 0 falls back to the hard-coded default (4). Since Phase 3
+          removed the exclusive per-KB lock, one KB's backlog could otherwise
+          monopolize the whole pool during a bulk import and starve other KBs;
+          this knob trades a single KB's peak throughput for cross-KB fairness.
+          Set it >= the wiki pool size to effectively disable the cap.
         type: integer
       ingest_reduce_parallel:
         description: |-
           IngestReduceParallel sets the errgroup limit for the Reduce phase
-          (per-slug page write). 0 falls back to 10. Bound by the same
-          LLM concurrency / HTTP pool considerations as the Map phase,
-          plus DB connection pool size.
+          (per-slug page write) WITHIN one batch. 0 falls back to 10. Bound by the
+          same LLM concurrency / HTTP pool considerations as the Map phase, plus
+          DB connection pool size. Same multiplier caveat as IngestMapParallel.
         type: integer
       max_pages_per_ingest:
         description: MaxPagesPerIngest limits pages created/updated per ingest operation
@@ -4321,6 +4439,8 @@ definitions:
               Without that distinction, users could set strategy="auto" once
               but never reset it back to legacy / unset.
             type: string
+          tableMetadataInstructions:
+            type: string
           tokenLimit:
             type: integer
         type: object
@@ -4338,6 +4458,8 @@ definitions:
       nodeExtract:
         description: 知识图谱配置
         properties:
+          customInstructions:
+            type: string
           enabled:
             type: boolean
           nodes:
@@ -4358,6 +4480,8 @@ definitions:
       questionGeneration:
         description: 问题生成配置
         properties:
+          customInstructions:
+            type: string
           enabled:
             type: boolean
           questionCount:
@@ -4592,12 +4716,75 @@ definitions:
     required:
     - modelName
     type: object
+  internal_handler.ResetUserPasswordRequest:
+    properties:
+      email:
+        type: string
+      new_password:
+        type: string
+    required:
+    - email
+    - new_password
+    type: object
   internal_handler.RevokeSystemAdminRequest:
     properties:
       user_id:
         type: string
     required:
     - user_id
+    type: object
+  internal_handler.RuntimeQueuesResponse:
+    properties:
+      available:
+        type: boolean
+      model_limiter_available:
+        type: boolean
+      models:
+        items:
+          $ref: '#/definitions/github_com_Tencent_WeKnora_internal_models_limiter.RuntimeStat'
+        type: array
+      parse_concurrency:
+        description: compatibility alias for upstream_concurrency
+        type: integer
+      pools:
+        items:
+          $ref: '#/definitions/internal_handler.RuntimeWorkerPool'
+        type: array
+      queues:
+        items:
+          $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.QueueStat'
+        type: array
+      timestamp:
+        type: integer
+      upstream_concurrency:
+        type: integer
+      wiki_concurrency:
+        description: compatibility field
+        type: integer
+    type: object
+  internal_handler.RuntimeWorkerPool:
+    description: Return every row in the system_settings table (system-scope, not
+      tenant-scope). SystemAdmin only.
+    properties:
+      active:
+        description: live workers assigned to this pool
+        type: integer
+      cluster_capacity:
+        description: sum of live server concurrency
+        type: integer
+      concurrency:
+        description: configured per instance
+        type: integer
+      instances:
+        description: live asynq server heartbeats
+        type: integer
+      name:
+        type: string
+      queue_count:
+        type: integer
+      utilization:
+        description: Active / ClusterCapacity
+        type: number
     type: object
   internal_handler.SearchMessagesRequest:
     properties:
@@ -5112,9 +5299,19 @@ definitions:
         items:
           type: string
         type: array
+      mentioned_items:
+        description: Optional scoped tag mentions
+        items:
+          $ref: '#/definitions/internal_handler_session.MentionedItemRequest'
+        type: array
       query:
         description: Query text to search for
         type: string
+      tag_ids:
+        description: Tag IDs for filtering within a single KB
+        items:
+          type: string
+        type: array
     required:
     - query
     type: object
@@ -7596,6 +7793,34 @@ paths:
       - Bearer: []
       - ApiKeyAuth: []
       summary: 更新知识库
+      tags:
+      - 知识库
+  /knowledge-bases/{id}/duplicate:
+    post:
+      consumes:
+      - application/json
+      description: 创建一个只包含设置的新知识库副本，不复制知识、FAQ 内容、分块、索引、Wiki 页面、分享或置顶状态
+      parameters:
+      - description: 源知识库 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: 创建后的知识库副本
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: 请求参数错误
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      summary: 创建知识库副本
       tags:
       - 知识库
   /knowledge-bases/{id}/faq/entries:
@@ -12200,28 +12425,19 @@ paths:
       summary: Revoke system administrator privileges from a user
       tags:
       - System Admin
-  /system/admin/settings:
+  /system/admin/runtime/queues:
     get:
-      description: |-
-        Return every row in the system_settings table (system-scope,
-        not tenant-scope). SystemAdmin only.
+      description: 返回各 asynq 队列的实时深度（pending/active/scheduled/retry 等）与 worker 并发配置，仅系统管理员可见
       produces:
       - application/json
       responses:
         "200":
-          description: list of settings
+          description: OK
           schema:
-            items:
-              $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.SystemSetting'
-            type: array
-        "403":
-          description: 'Forbidden: not a system admin'
-          schema:
-            additionalProperties: true
-            type: object
-      summary: List all system settings
+            $ref: '#/definitions/internal_handler.RuntimeQueuesResponse'
+      summary: 获取解析任务队列运行时状态
       tags:
-      - System Admin
+      - 系统管理
   /system/admin/settings/{key}:
     delete:
       description: |-
@@ -12347,6 +12563,46 @@ paths:
             additionalProperties: true
             type: object
       summary: Apply the default storage quota to every existing tenant
+      tags:
+      - System Admin
+  /system/admin/users/reset-password:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Replace another user's local password and revoke all of their existing sessions (SystemAdmin only).
+        A system administrator cannot reset their own password through this endpoint; self-service password change still requires the old password.
+      parameters:
+      - description: Password reset request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handler.ResetUserPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Password reset successfully
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid request, weak password, or self reset
+          schema:
+            additionalProperties: true
+            type: object
+        "403":
+          description: 'Forbidden: not a system admin'
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: User not found
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Reset another user's password
       tags:
       - System Admin
   /system/docreader/reconnect:
@@ -12479,6 +12735,8 @@ paths:
         创建新的租户。任意已登录用户均可调用以建立自己的新工作区，
         调用方会被自动设为该租户的 Owner。跨租户超管仍可像以前一样
         通过本接口创建任意租户。
+        当 tenant.auto_create_api_key（或 WEKNORA_TENANT_AUTO_CREATE_API_KEY）
+        开启时，会自动创建一个 full_access API Key，并在响应体的 data.api_key 字段返回其明文 token。
       parameters:
       - description: 租户信息
         in: body
@@ -12490,7 +12748,7 @@ paths:
       - application/json
       responses:
         "201":
-          description: 创建的租户
+          description: 创建的租户（可选含 api_key）
           schema:
             additionalProperties: true
             type: object

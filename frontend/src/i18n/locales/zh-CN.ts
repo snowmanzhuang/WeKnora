@@ -15,6 +15,9 @@ export default {
     clearMessages: "清空消息",
     clearMessagesSuccess: "消息已清空",
     clearMessagesFailed: "清空消息失败，请稍后再试",
+    renameSession: "修改标题",
+    renameSessionSuccess: "标题已更新",
+    renameSessionFailed: "修改标题失败，请稍后再试",
     batchManage: "批量管理",
     newSession: "新会话",
     pin: "置顶",
@@ -1075,6 +1078,7 @@ export default {
     storageEngine: "存储引擎",
     mcpService: "MCP服务",
     versionInfo: "版本信息",
+    taskQueue: "任务队列",
     tenantInfo: "空间信息",
     apiInfo: "API信息",
     navGroups: {
@@ -1082,6 +1086,7 @@ export default {
       workspace: "空间",
       modelsRuntime: "模型",
       dataExtensions: "数据与扩展",
+      systemAdministration: "系统管理",
       platform: "平台",
     },
     roleDenied: {
@@ -1498,6 +1503,9 @@ export default {
     sampleTextLabel: "示例文本",
     sampleTextDescription: "用于测试实体关系提取的示例文本",
     sampleTextPlaceholder: "输入一段包含实体和关系的文本...",
+    customInstructionsLabel: "额外提取要求",
+    customInstructionsDescription: "补充领域范围、实体筛选和属性提取要求；系统仍负责结构化输出协议",
+    customInstructionsPlaceholder: "例如：重点提取合同主体、金额、履约期限和违约责任…",
     generateRandomText: "生成随机文本",
     entityListLabel: "实体列表",
     entityListDescription: "从文本中提取的实体及其属性",
@@ -1793,10 +1801,10 @@ export default {
     registerNow: "立即注册",
     loginHint: "登录以继续使用；首次使用请在下方创建账户。",
     firstTime: "首次使用 WeKnora？",
-    registerSuccess: "注册成功！系统已为您创建专属空间，请登录",
+    registerSuccess: "注册成功，请登录",
     registerFailed: "注册失败",
     subtitle: "RAG 问答、ReAct 智能体与 Wiki 知识库，大模型驱动的企业级知识框架",
-    registerSubtitle: "注册后系统将为您创建专属空间",
+    registerSubtitle: "创建账户并开始使用 WeKnora",
     emailPlaceholder: "输入邮箱地址",
     passwordPlaceholder: "输入密码（8-32个字符，包含字母和数字）",
     confirmPasswordPlaceholder: "再次输入密码",
@@ -1818,6 +1826,20 @@ export default {
     loginErrorRetry: "登录错误，请稍后重试",
     registerError: "注册错误，请稍后重试",
     forgotPasswordNotAvailable: "密码找回功能暂不可用，请联系管理员",
+    workspaceOnboarding: {
+      title: "选择你的工作空间",
+      description: "你的账户尚未加入任何空间。你可以创建一个新空间，或接受管理员发来的邀请。",
+      create: "创建空间",
+      invitations: "查看邀请",
+      help: "如果这里没有可用邀请，请联系系统管理员将你加入现有空间。",
+      loadingPolicy: "正在确认可用的空间加入方式…",
+      policyLoadFailed: "暂时无法获取空间权限，请检查网络后重试。",
+      retry: "重新加载",
+      inviteOnlyTitle: "等待加入工作空间",
+      inviteOnlyDescription: "当前系统不开放个人创建空间。你可以查看并接受管理员发来的空间邀请。",
+      inviteOnlyNotice: "此账户只能通过邀请加入已有空间",
+      inviteOnlyHelp: "还没有邀请？请把你的注册邮箱提供给空间管理员，由管理员向你发送邀请。",
+    },
   },
   authStore: {
     errors: {
@@ -2166,6 +2188,13 @@ export default {
       configureAction: "去配置",
       sharedNotReadyContact: "请联系分享方管理员完成配置",
       capabilitiesSection: "能力",
+      webSearchCapability: "网络搜索",
+      imageUploadCapability: "图片上传",
+      capabilityEnabled: "开启",
+      capabilityDisabled: "关闭",
+      capabilitySupported: "支持",
+      capabilityUnsupported: "不支持",
+      capabilityUnconfigured: "未配置",
     },
     // 内置智能体信息
     builtinInfo: {
@@ -2289,6 +2318,7 @@ export default {
       cancel: "取消",
       success: "空间创建成功",
       failed: "空间创建失败",
+      disabled: "当前系统只允许通过邀请加入空间，不能自行创建空间。",
     },
     details: {
       idLabel: "空间 ID",
@@ -2443,31 +2473,183 @@ export default {
       description: "平台级运行时配置，保存后立即对所有租户生效。仅系统管理员可见可改。",
       loading: "加载中...",
       empty: "暂无可配置的系统设置",
+      autoSaveHint: "修改后自动保存",
+      saving: "保存中",
+      saved: "已保存",
+      saveAnnouncement: "{label} 已保存",
       badgeRequiresRestart: "需重启",
       badgeSecret: "敏感",
+      badgeHighRisk: "高风险",
       badgeOverride: "已覆盖",
       badgeOverrideTooltip: "该值已由管理员保存到数据库，覆盖了环境变量与默认值",
       modifiedAt: "上次修改：{value}",
       tagInputPlaceholder: "回车添加条目，例：example.com / *.foo.com / 10.0.0.0/8",
       priorityHint: {
         title: "关于优先级",
+        disclosure: "配置来源与优先级",
         tier1: "在此页面保存过的项（带「已覆盖」徽章）— 始终以这里的值为准，环境变量会被忽略。",
         tier2: "未在此处保存过的项 — 如果环境变量里有就用环境变量，否则用程序内置默认值。",
         tier3: "若想让某项重新由环境变量控制，点击该行的「重置」按钮即可清除当前 UI 设置。",
       },
+      summary: {
+        overridden: "已覆盖 {count}",
+        restart: "需重启 {count}",
+      },
+      sections: {
+        access: {
+          tab: "账户与访问 {count}",
+          title: "账户与访问",
+          description: "管理系统管理员、公开注册与用户创建空间的规则。",
+        },
+        tenant: {
+          tab: "租户默认值 {count}",
+          title: "租户默认值",
+          description: "设置新租户的初始配额与兼容性行为，不会自动改写已有租户。",
+        },
+        runtime: {
+          tab: "运行与并发 {count}",
+          title: "运行与并发",
+          description: "配置后台任务池与模型服务的并发容量。",
+          restartHint: "Worker 配置需重启生效",
+        },
+        security: {
+          tab: "网络安全 {count}",
+          title: "网络安全",
+          description: "管理可绕过 SSRF 防护的受信主机、IP 与网段。",
+        },
+        other: {
+          tab: "其他 {count}",
+          title: "其他配置",
+          description: "当前部署中未归入标准分组的配置项。",
+        },
+      },
+      runtimeTable: {
+        setting: "配置项与用途",
+        value: "当前值",
+      },
+      runtime: {
+        title: "任务队列运行时",
+        description: "后台任务队列的实时负载，以及各独立 worker 池的每实例并发配置。仅供观察，每 5 秒自动刷新。",
+        refresh: "刷新",
+        autoRefresh: "自动刷新（每 5 秒）",
+        loading: "加载中...",
+        retry: "重试",
+        unavailableTitle: "任务队列不可用",
+        unavailable: "当前部署未启用 Redis / asynq 队列（Lite 模式），无队列可展示。",
+        paused: "已暂停",
+        empty: "暂无队列数据",
+        detailsTitle: "队列明细",
+        detailsDescription: "各处理通道的实时负载与等待情况。",
+        poolsTitle: "Worker 池",
+        poolsDescription: "各阶段拥有保底容量，核心解析与内容富化还可借用共享弹性池。",
+        perInstance: "卡片主值为集群运行中/容量",
+        poolConfigured: "单实例配置 {value}",
+        poolInstances: "{value} 个实例",
+        poolUtilization: "利用率 {value}%",
+        queueCount: "{value} 个队列",
+        weight: "池内权重 {value}",
+        footnote: "卡片主值为集群运行中/实时容量；单实例配置修改后需重启。共享弹性池只消费核心解析和内容富化队列。",
+        updatedAt: "更新于 {value}",
+        errors: {
+          generic: "获取队列状态失败",
+        },
+        summary: {
+          title: "运行概览",
+          active: "运行中",
+          pending: "排队中",
+          retry: "重试中",
+          archived: "死信",
+        },
+        columns: {
+          queue: "队列",
+          active: "运行中",
+          pending: "排队",
+          scheduled: "定时",
+          retry: "重试",
+          archived: "死信",
+          latency: "最早等待",
+          status: "状态",
+        },
+        status: {
+          working: "处理中",
+          waiting: "等待中",
+          idle: "空闲",
+          attention: "需关注",
+          paused: "已暂停",
+        },
+        models: {
+          title: "模型并发占用",
+          description: "观察后台任务实际进入模型服务时的并发占用；上方是任务调度，这里是模型服务限流，两者处于不同处理阶段。",
+          scope: "占用为集群全局 · 等待为当前实例",
+          disabled: "模型后台并发治理未启用。可在全局设置中配置模型默认并发上限。",
+          empty: "暂无模型调用数据；模型首次执行后台任务后会出现在这里。",
+          backgroundOnly: "仅统计后台任务，不包含交互式对话",
+          columns: { model: "模型 ID", active: "调用中", waiting: "限流等待", usage: "并发用量" },
+          status: { queued: "限流中", full: "已满载" },
+        },
+        pools: {
+          core: "核心解析",
+          postprocess: "后处理编排",
+          enrichment: "内容富化",
+          maintenance: "维护与同步",
+          shared: "共享弹性",
+          wiki: "Wiki 池",
+        },
+        poolDescriptions: {
+          core: "文档解析与手工重解析的保底容量",
+          postprocess: "解析完成后的收尾与富化扇出",
+          enrichment: "摘要、图片、图谱与问题生成",
+          maintenance: "数据源同步、批处理与删除清理",
+          shared: "由核心解析与内容富化按积压借用",
+          wiki: "Wiki 内容生成与全局收尾",
+        },
+        queueNames: {
+          default: "默认（文档解析）",
+          postprocess: "后处理编排",
+          summary: "摘要生成",
+          sync: "数据源同步",
+          low: "后台维护与批处理",
+          multimodal: "多模态（图片）",
+          graph: "图谱抽取",
+          question: "问题生成",
+          wiki: "Wiki 同步",
+        },
+        queueDescriptions: {
+          default: "文档解析与手工更新",
+          postprocess: "解析完成后的状态收尾与富化任务扇出",
+          summary: "文档摘要与表格摘要",
+          sync: "手动与定时数据源同步",
+          low: "FAQ 导入、复制移动、批量重解析与删除清理",
+          multimodal: "图片 OCR 与多模态描述",
+          graph: "从文档分块提取知识图谱",
+          question: "基于文档分块生成问题",
+          wiki: "Wiki 内容生成与索引同步",
+        },
+      },
       keyLabels: {
         auth: {
           registration_mode: "自助注册模式",
+          default_tenant_mode: "注册默认空间策略",
         },
         ssrf: {
           whitelist: "SSRF 防护白名单",
         },
         tenant: {
           max_owned_per_user: "每用户最大租户数",
+          self_service_creation_enabled: "允许用户自助创建空间",
           default_storage_quota_gb: "新租户默认存储配额 (GB)",
+          auto_create_api_key: "创建租户时自动生成 API Key",
         },
         asynq: {
-          concurrency: "异步任务并发数",
+          core_concurrency: "核心解析保底并发数",
+          postprocess_concurrency: "后处理编排并发数",
+          enrichment_concurrency: "内容富化保底并发数",
+          maintenance_concurrency: "维护与同步并发数",
+          shared_concurrency: "共享弹性并发数",
+          wiki_concurrency: "Wiki Worker 并发数",
+        },
+        model: {
+          max_concurrency: "模型默认并发上限",
         },
       },
       keyDescriptions: {
@@ -2475,6 +2657,9 @@ export default {
           registration_mode:
             "自助注册模式。self_serve = 任何人可注册账号；invite_only = 关闭公网注册，" +
             "仅 Owner/Admin 可邀请。修改后立即生效，但谨慎对待 self_serve（公网会接受 spam）。",
+          default_tenant_mode:
+            "公开注册后的空间初始化策略。create_personal 会自动创建个人空间并授予 Owner；" +
+            "tenantless 仅创建账户，用户需要接受邀请或主动创建空间。只影响之后注册的用户。",
         },
         ssrf: {
           whitelist:
@@ -2485,16 +2670,32 @@ export default {
           max_owned_per_user:
             "每个非超管用户通过自助创建可拥有的最大租户数。每次创建租户时实时读取，" +
             "修改后立即生效。0 表示使用内置默认值 10；负数表示完全关闭限制（不建议在公开部署使用）。",
+          self_service_creation_enabled:
+            "是否允许非超管用户主动创建空间。关闭后，普通用户只能通过邀请加入已有空间；" +
+            "跨租户超管仍可创建。修改后立即生效。",
           default_storage_quota_gb:
             "新建租户时默认分配的存储配额（GB），包含向量、原文、文本、索引等。" +
             "仅在创建时读取，修改后只对之后新建的租户生效，不会回写已存在的租户。" +
             "0 或负数表示使用内置默认值 10GB。",
+          auto_create_api_key:
+            "为新租户自动生成 full_access API Key，并在创建响应中返回明文 token。" +
+            "仅用于兼容依赖旧行为的集成；默认关闭，建议通过 API Key 管理显式创建。",
         },
         asynq: {
-          concurrency:
-            "异步任务 worker 并发数（asynq 线程池大小）。" +
-            "文档解析、嵌入等任务多为 I/O 等待，适当提高可缩短批量上传排队时间。" +
-            "修改后需重启服务进程方可生效。",
+          core_concurrency: "文档解析与手工重解析的每实例保底并发，可额外借用共享弹性池；修改后需重启。",
+          postprocess_concurrency: "解析完成后的轻量收尾和富化扇出专用并发；修改后需重启。",
+          enrichment_concurrency: "摘要、图片、图谱与问题生成的每实例保底并发，可额外借用共享弹性池；修改后需重启。",
+          maintenance_concurrency: "数据源同步、批处理和清理任务的每实例并发，与用户面流水线硬隔离；修改后需重启。",
+          shared_concurrency: "核心解析与内容富化共同使用的每实例弹性并发，由有积压的一侧自动借用；修改后需重启。",
+          wiki_concurrency:
+            "每个服务实例的 Wiki 专用 Worker 并发数，与上游任务池相互隔离。" +
+            "最小值为 1；修改后需重启服务进程方可生效。",
+        },
+        model: {
+          max_concurrency:
+            "后台任务（文档入库/富化）对单个模型的默认并发上限，按模型 ID 全副本共享。" +
+            "每次调用实时读取，修改后立即生效、无需重启。0 或负数表示关闭默认限制" +
+            "（各模型仍会尊重自身在模型管理里配置的上限）。仅影响后台任务，不影响交互式对话。",
         },
       },
       enumLabels: {
@@ -2502,6 +2703,10 @@ export default {
           registration_mode: {
             self_serve: "自助注册（任何人可注册）",
             invite_only: "仅邀请（关闭公网注册）",
+          },
+          default_tenant_mode: {
+            create_personal: "自动创建个人空间",
+            tenantless: "不自动创建空间",
           },
         },
       },
@@ -2562,6 +2767,32 @@ export default {
           },
         },
       },
+      passwordReset: {
+        label: "重置用户密码",
+        description: "为忘记密码的其他用户设置新密码。重置成功后，该用户当前所有登录会话都会失效，需要使用新密码重新登录。",
+        action: "重置密码",
+        dialogTitle: "重置其他用户的密码",
+        warning: "这是高风险操作。请核对用户邮箱；出于安全考虑，不能在这里重置自己的密码。",
+        emailLabel: "用户邮箱",
+        emailPlaceholder: "输入需要重置密码的用户邮箱",
+        newPasswordLabel: "新密码",
+        newPasswordPlaceholder: "8-32 个字符，包含字母和数字",
+        confirmPasswordLabel: "确认新密码",
+        confirmPasswordPlaceholder: "再次输入新密码",
+        confirmBtn: "确认重置",
+        success: "密码已重置，该用户的现有会话已失效",
+        failed: "重置密码失败",
+        validation: {
+          emailRequired: "请输入用户邮箱",
+          emailInvalid: "请输入有效的邮箱地址",
+          passwordRequired: "请输入新密码",
+          passwordLength: "密码长度必须为 8-32 个字符",
+          passwordLetter: "密码必须包含字母",
+          passwordNumber: "密码必须包含数字",
+          confirmRequired: "请再次输入新密码",
+          passwordMismatch: "两次输入的密码不一致",
+        },
+      },
       bulkApply: {
         label: "应用到所有现有租户",
         tooltip: "保存的值默认只对之后新建的租户生效；点击此按钮将当前值同步写入所有现有租户。",
@@ -2599,6 +2830,7 @@ export default {
           "system.setting_changed": "系统设置变更",
           "system.admin_promoted": "授予系统管理员",
           "system.admin_revoked": "回收系统管理员",
+          "system.user_password_reset": "重置用户密码",
         },
         outcome: {
           success: "成功",
@@ -2777,6 +3009,9 @@ export default {
       dimensionOverrideDesc: "仅在确认该模型支持 dimensions 参数时开启；默认只使用检测到的实际维度。",
       supportsVisionLabel: "支持视觉/多模态",
       supportsVisionDesc: "模型是否支持图片等多模态输入",
+      maxConcurrencyLabel: "后台并发上限",
+      maxConcurrencyPlaceholder: "0 表示使用全局默认",
+      maxConcurrencyDesc: "限制文档入库/富化等后台任务对该模型的并发调用数（按模型全副本共享）。0 或留空表示沿用全局默认；不影响交互式对话。",
       thinkingControlLabel: "思考模式参数格式",
       thinkingControlDesc:
         "决定智能体「思考模式」开/关时如何写入 API。已尝试按厂商/模型预选，若与实际情况不符请按 API 文档手动修改；选「不写入」时，智能体「思考模式」开关不生效。",
@@ -2849,6 +3084,10 @@ export default {
         openrouter: {
           label: "OpenRouter",
           description: "openai/gpt-5.2-chat, google/gemini-3-flash-preview, etc.",
+        },
+        requesty: {
+          label: "Requesty",
+          description: "openai/gpt-4o-mini, anthropic/claude-sonnet-4-5, etc.",
         },
         generic: {
           label: "自定义 (OpenAI兼容接口)",
@@ -3177,6 +3416,7 @@ export default {
     },
     menu: {
       viewDetails: "查看详情",
+      duplicate: "创建副本",
     },
     pin: {
       pin: "置顶",
@@ -3222,10 +3462,13 @@ export default {
       knowledgeGraph: "知识图谱",
       multimodal: "多模态",
       questionGeneration: "问题生成",
+      wiki: "Wiki",
     },
     messages: {
       deleted: "已删除",
       deleteFailed: "删除失败",
+      duplicateSuccess: "知识库副本已创建（不包含知识内容）",
+      duplicateFailed: "创建知识库副本失败",
       file: "文件",
       knowledgeBase: "知识库",
       noResult: "无结果",
@@ -3466,6 +3709,12 @@ export default {
       maxPagesLabel: "单次最大页面数",
       maxPagesTip: "每次 Ingest 最多创建/更新的页面数（0 表示不限制）",
       extractionGranularityLabel: "提取粒度",
+      contentInstructionsLabel: "Wiki 内容生成要求",
+      contentInstructionsTip: "控制摘要、页面和首页的表达重点；引用、合并与防幻觉规则由系统固定维护。修改后需重新解析才能影响已有内容。",
+      contentInstructionsPlaceholder: "例如：使用法务审阅口吻，优先展示责任主体、时间线和风险提示…",
+      extractionInstructionsLabel: "Wiki 提取重点",
+      extractionInstructionsTip: "说明应重点识别的领域实体和概念，不会替换系统的 JSON 与引用协议。",
+      extractionInstructionsPlaceholder: "例如：重点识别产品、版本、组织、负责人和关键技术概念…",
       extractionGranularityTip: "控制每篇文档抽取的 Wiki 实体/概念数量。粒度越细，索引越聚焦；粒度越粗，索引越详尽",
       granularityFocused: "聚焦",
       granularityStandard: "标准",
@@ -3888,6 +4137,14 @@ export default {
         description: "解析文档时调用大模型为每个分块生成相关问题，提高检索召回率。启用后会增加文档解析耗时。",
         countLabel: "生成问题数量",
         countDescription: "每个文档分块生成的问题数量（1-10）",
+        instructionsLabel: "问题生成要求",
+        instructionsDescription: "指定问题面向的人群、场景和表达方式，系统仍维护稳定输出格式",
+        instructionsPlaceholder: "例如：生成客服用户常问的自然语言问题，避免考试题式表达…",
+      },
+      tableMetadataInstructions: {
+        label: "表格元数据生成要求",
+        description: "为 CSV/Excel 摘要补充业务背景和字段语义，帮助后续检索理解表格内容",
+        placeholder: "例如：这是销售订单表，金额单位为元，status 字段使用公司内部状态码…",
       },
       multimodal: {
         label: "多模态功能",
@@ -3895,6 +4152,12 @@ export default {
         vllmLabel: "VLLM 视觉模型",
         vllmDescription: "用于多模态理解的视觉语言模型（必选）",
         vllmPlaceholder: "请选择 VLLM 模型（必选）",
+        descriptionLanguageLabel: "图片描述语言",
+        descriptionLanguageDescription: "留空时跟随文档语言；不再强制使用中文",
+        descriptionLanguageAuto: "自动跟随文档语言",
+        customInstructionsLabel: "图片解析要求",
+        customInstructionsDescription: "补充需要重点识别的视觉信息，OCR 和 Markdown 格式协议保持不变",
+        customInstructionsPlaceholder: "例如：重点识别设备铭牌、型号、告警代码和表格中的单位…",
         storageTitle: "存储配置",
         storageTypeLabel: "存储类型",
         storageTypeDescription:
