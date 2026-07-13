@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ var (
 	_ im.Adapter        = (*Adapter)(nil)
 	_ im.StreamSender   = (*Adapter)(nil)
 	_ im.FileDownloader = (*Adapter)(nil)
+	_ im.ImageSender    = (*Adapter)(nil)
 )
 
 // Adapter implements im.Adapter for Telegram Bot API.
@@ -72,8 +74,8 @@ func (a *Adapter) VerifyCallback(c *gin.Context) error {
 
 // telegramUpdate represents an incoming Telegram update (subset of fields).
 type telegramUpdate struct {
-	UpdateID int             `json:"update_id"`
-	Message  *telegramMsg    `json:"message"`
+	UpdateID int          `json:"update_id"`
+	Message  *telegramMsg `json:"message"`
 }
 
 type telegramMsg struct {
@@ -230,6 +232,55 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	return a.callAPI(ctx, "sendMessage", body)
 }
 
+const telegramMaxPhotoCaptionLen = 1024
+
+func (a *Adapter) SendImage(ctx context.Context, incoming *im.IncomingMessage, image *im.OutboundImage) error {
+	if image == nil || len(image.Data) == 0 {
+		return fmt.Errorf("image data is required")
+	}
+
+	chatID := resolveChatID(incoming)
+	fileName := strings.TrimSpace(image.FileName)
+	if fileName == "" {
+		fileName = "image.png"
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", chatID); err != nil {
+		return fmt.Errorf("write chat_id: %w", err)
+	}
+	if incoming.ThreadID != "" {
+		if tid, err := strconv.Atoi(incoming.ThreadID); err == nil {
+			if err := writer.WriteField("message_thread_id", strconv.Itoa(tid)); err != nil {
+				return fmt.Errorf("write message_thread_id: %w", err)
+			}
+		}
+	}
+	caption := strings.TrimSpace(image.Caption)
+	if caption != "" {
+		captionRunes := []rune(caption)
+		if len(captionRunes) > telegramMaxPhotoCaptionLen {
+			caption = string(captionRunes[:telegramMaxPhotoCaptionLen])
+		}
+		if err := writer.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("write caption: %w", err)
+		}
+	}
+	part, err := writer.CreateFormFile("photo", fileName)
+	if err != nil {
+		return fmt.Errorf("create photo field: %w", err)
+	}
+	if _, err := io.Copy(part, bytes.NewReader(image.Data)); err != nil {
+		return fmt.Errorf("write photo: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	return a.callMultipartAPI(ctx, "sendPhoto", writer.FormDataContentType(), &body)
+}
+
 func (a *Adapter) sendMessage(ctx context.Context, chatID, text, replyToMessageID string) error {
 	body := map[string]interface{}{
 		"chat_id":    chatID,
@@ -302,6 +353,34 @@ func (a *Adapter) callAPIWithResult(ctx context.Context, method string, body int
 	return nil
 }
 
+func (a *Adapter) callMultipartAPI(ctx context.Context, method string, contentType string, body io.Reader) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/%s", a.botToken, method)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp struct {
+		OK     bool            `json:"ok"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if !apiResp.OK {
+		return fmt.Errorf("telegram API %s failed: %s", method, string(apiResp.Result))
+	}
+	return nil
+}
+
 // ── StreamSender implementation (edit message in-place) ──
 
 // minEditInterval is the minimum time between consecutive editMessageText calls
@@ -311,7 +390,7 @@ const minEditInterval = 500 * time.Millisecond
 type streamState struct {
 	mu        sync.Mutex
 	content   strings.Builder
-	msgID     string    // Telegram message ID of the "thinking" message
+	msgID     string // Telegram message ID of the "thinking" message
 	chatID    string
 	lastEdit  time.Time // last successful editMessageText timestamp
 	createdAt time.Time // for orphan stream detection
