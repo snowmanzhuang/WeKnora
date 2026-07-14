@@ -1601,11 +1601,11 @@ func (s *Service) executeQARequest(req *qaRequest) {
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	replyContent, outboundImages := s.prepareIMDisplayContent(
+	preparer := newIMDisplayPreparer(s, req.adapter, req.msg, req.tenant)
+	replyContent, outboundImages := preparer.prepare(
 		ctx,
 		FormatIMDisplayContent(answer, StreamDisplayFinal),
-		req.tenant,
-		adapterSupportsImages(req.adapter),
+		true,
 	)
 	if strings.TrimSpace(replyContent) == "" && len(outboundImages) > 0 {
 		replyContent = "已找到相关图片："
@@ -2035,6 +2035,21 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 		logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
 		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, userKey, tenant)
 	}
+	streamFinished := false
+	defer func() {
+		if streamFinished {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		failure := "抱歉，处理您的问题时出现了异常，请稍后再试。"
+		if finalizeErr := streamer.FinalizeStream(cleanupCtx, msg, streamID, failure); finalizeErr != nil {
+			logger.Warnf(cleanupCtx, "[IM] Failed to finalize aborted stream: %v", finalizeErr)
+		}
+		if endErr := streamer.EndStream(cleanupCtx, msg, streamID); endErr != nil {
+			logger.Warnf(cleanupCtx, "[IM] Failed to end aborted stream: %v", endErr)
+		}
+	}()
 
 	// Prepare the QA pipeline
 	// No total deadline: each agent round has its own LLMCallTimeout (default 120s).
@@ -2349,6 +2364,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	// Flush loop: periodically send buffered content to the IM platform.
 	// A holdback mechanism prevents flushing incomplete provider:// URLs or
 	// XML tags that straddle a chunk boundary (see holdbackCutoff).
+	displayPreparer := newIMDisplayPreparer(s, adapter, msg, tenant)
 	ticker := time.NewTicker(streamFlushInterval)
 	defer ticker.Stop()
 
@@ -2367,7 +2383,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			displaySource = displaySource[:cut]
 		}
 
-		display := cleanIMContent(ctx, displaySource, tenant, s.defaultFileSvc)
+		display, _ := displayPreparer.prepare(ctx, displaySource, false)
 		if err := streamer.UpdateStreamContent(ctx, msg, streamID, display); err != nil {
 			logger.Warnf(ctx, "[IM] UpdateStreamContent failed: %v", err)
 		}
@@ -2406,11 +2422,10 @@ loop:
 	authServices := append([]imMCPAuthService(nil), mcpAuthServices...)
 	bufMu.Unlock()
 
-	finalDisplay, outboundImages := s.prepareIMDisplayContent(
+	finalDisplay, outboundImages := displayPreparer.prepare(
 		ctx,
 		FormatIMFinalFromParts(parts),
-		tenant,
-		adapterSupportsImages(adapter),
+		true,
 	)
 	if strings.TrimSpace(finalDisplay) == "" && len(outboundImages) > 0 {
 		finalDisplay = "已找到相关图片："
@@ -2438,6 +2453,7 @@ loop:
 	if err := streamer.EndStream(ctx, msg, streamID); err != nil {
 		logger.Warnf(ctx, "[IM] EndStream failed: %v", err)
 	}
+	streamFinished = true
 	sendIMOutboundImages(ctx, adapter, msg, outboundImages)
 
 	if answer == "" {
@@ -2462,11 +2478,11 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
 	}
 
-	replyContent, outboundImages := s.prepareIMDisplayContent(
+	preparer := newIMDisplayPreparer(s, adapter, msg, tenant)
+	replyContent, outboundImages := preparer.prepare(
 		ctx,
 		FormatIMDisplayContent(answer, StreamDisplayFinal),
-		tenant,
-		adapterSupportsImages(adapter),
+		true,
 	)
 	if strings.TrimSpace(replyContent) == "" && len(outboundImages) > 0 {
 		replyContent = "已找到相关图片："

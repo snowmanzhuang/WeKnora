@@ -2,9 +2,12 @@ package im
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
@@ -13,6 +16,9 @@ import (
 const (
 	maxIMOutboundImages     = 5
 	maxIMOutboundImageBytes = 10 << 20
+	maxIMInlineImages       = 20
+	maxIMInlineUploads      = 3
+	inlineImageRetryDelay   = 5 * time.Second
 )
 
 var imRemovedImageBlankLinesRe = regexp.MustCompile(`\n{3,}`)
@@ -24,23 +30,226 @@ type imMarkdownImageSpan struct {
 	Path  string
 }
 
+// imInlineImageRewriter owns the upload cache for one outbound reply. Keeping
+// it for the full stream prevents each periodic card update from re-uploading
+// images that have already received a platform-specific reference.
+type imInlineImageRewriter struct {
+	uploader InlineImageUploader
+	incoming *IncomingMessage
+	resolver *imFileServiceResolver
+
+	refs     map[string]string
+	failures map[string]time.Time
+	tracked  map[string]struct{}
+	blocked  map[string]struct{}
+}
+
+type imDisplayPreparer struct {
+	service        *Service
+	tenant         *types.Tenant
+	separateImages bool
+	inlineImages   *imInlineImageRewriter
+}
+
+func newIMDisplayPreparer(
+	service *Service,
+	adapter Adapter,
+	incoming *IncomingMessage,
+	tenant *types.Tenant,
+) *imDisplayPreparer {
+	preparer := &imDisplayPreparer{
+		service:        service,
+		tenant:         tenant,
+		separateImages: adapterSupportsImages(adapter),
+	}
+	if uploader, ok := adapter.(InlineImageUploader); ok {
+		preparer.inlineImages = &imInlineImageRewriter{
+			uploader: uploader,
+			incoming: incoming,
+			resolver: newIMFileServiceResolver(tenant, service.defaultFileSvc),
+			refs:     make(map[string]string),
+			failures: make(map[string]time.Time),
+			tracked:  make(map[string]struct{}),
+			blocked:  make(map[string]struct{}),
+		}
+	}
+	return preparer
+}
+
+func (p *imDisplayPreparer) prepare(
+	ctx context.Context,
+	display string,
+	final bool,
+) (string, []*OutboundImage) {
+	content := stripImageXMLTags(display)
+
+	var images []*OutboundImage
+	if final && p.separateImages {
+		content, images = p.service.extractIMOutboundImages(ctx, content, p.tenant)
+	}
+
+	content = stripIMCitationTags(content)
+	if p.inlineImages != nil {
+		content = p.inlineImages.rewrite(ctx, content, final)
+	}
+	resolver := newIMFileServiceResolver(p.tenant, p.service.defaultFileSvc)
+	content = rewriteStorageURLs(ctx, content, resolver)
+	return content, images
+}
+
 func (s *Service) prepareIMDisplayContent(
 	ctx context.Context,
 	display string,
 	tenant *types.Tenant,
 	includeImages bool,
 ) (string, []*OutboundImage) {
-	content := stripImageXMLTags(display)
+	preparer := &imDisplayPreparer{
+		service:        s,
+		tenant:         tenant,
+		separateImages: includeImages,
+	}
+	return preparer.prepare(ctx, display, true)
+}
 
-	var images []*OutboundImage
-	if includeImages {
-		content, images = s.extractIMOutboundImages(ctx, content, tenant)
+func (r *imInlineImageRewriter) rewrite(ctx context.Context, content string, final bool) string {
+	spans := scanIMMarkdownImages(content)
+	if len(spans) == 0 {
+		return content
 	}
 
-	content = stripIMCitationTags(content)
-	resolver := newIMFileServiceResolver(tenant, s.defaultFileSvc)
-	content = rewriteStorageURLs(ctx, content, resolver)
-	return content, images
+	pending := make(map[string]imMarkdownImageSpan)
+	now := time.Now()
+	for _, span := range spans {
+		if types.ParseProviderScheme(span.Path) == "" {
+			continue
+		}
+		if _, ok := r.refs[span.Path]; ok {
+			continue
+		}
+		if _, ok := r.blocked[span.Path]; ok {
+			continue
+		}
+		if _, ok := r.tracked[span.Path]; !ok {
+			if len(r.tracked) >= maxIMInlineImages {
+				r.blocked[span.Path] = struct{}{}
+				logger.Warnf(ctx, "[IM] Too many inline images; degrading image: %s", span.Path)
+				continue
+			}
+			r.tracked[span.Path] = struct{}{}
+		}
+		if failedAt, ok := r.failures[span.Path]; ok && !final && now.Sub(failedAt) < inlineImageRetryDelay {
+			continue
+		}
+		pending[span.Path] = span
+	}
+
+	if len(pending) > 0 {
+		r.uploadPending(ctx, pending)
+	}
+
+	return replaceIMMarkdownImageSpans(content, spans, func(span imMarkdownImageSpan) (string, bool) {
+		if types.ParseProviderScheme(span.Path) == "" {
+			return "", false
+		}
+		if ref := r.refs[span.Path]; ref != "" {
+			return fmt.Sprintf("![%s](%s)", span.Alt, ref), true
+		}
+		label := strings.TrimSpace(span.Alt)
+		if label == "" {
+			label = "图片"
+		}
+		return fmt.Sprintf("*图片暂时无法显示：%s*", label), true
+	})
+}
+
+func (r *imInlineImageRewriter) uploadPending(ctx context.Context, pending map[string]imMarkdownImageSpan) {
+	type uploadJob struct {
+		path  string
+		image *OutboundImage
+	}
+	type uploadResult struct {
+		path string
+		ref  string
+		err  error
+	}
+
+	jobs := make([]uploadJob, 0, len(pending))
+	for path, span := range pending {
+		image, err := loadIMOutboundImage(ctx, r.resolver, span)
+		if err != nil {
+			r.failures[path] = time.Now()
+			logger.Warnf(ctx, "[IM] Failed to load inline image: path=%s err=%v", path, err)
+			continue
+		}
+		jobs = append(jobs, uploadJob{path: path, image: image})
+	}
+
+	results := make(chan uploadResult, len(jobs))
+	sem := make(chan struct{}, maxIMInlineUploads)
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		job := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ref, err := r.uploader.UploadInlineImage(ctx, r.incoming, job.image)
+			if err == nil && strings.TrimSpace(ref) == "" {
+				err = fmt.Errorf("empty inline image reference")
+			}
+			results <- uploadResult{path: job.path, ref: strings.TrimSpace(ref), err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			r.failures[result.path] = time.Now()
+			logger.Warnf(ctx, "[IM] Failed to upload inline image: path=%s err=%v", result.path, result.err)
+			continue
+		}
+		r.refs[result.path] = result.ref
+		delete(r.failures, result.path)
+	}
+}
+
+func loadIMOutboundImage(
+	ctx context.Context,
+	resolver *imFileServiceResolver,
+	span imMarkdownImageSpan,
+) (*OutboundImage, error) {
+	fileSvc := resolver.resolve(span.Path)
+	if fileSvc == nil {
+		return nil, fmt.Errorf("no file service for %s", span.Path)
+	}
+	reader, err := fileSvc.GetFile(ctx, span.Path)
+	if err != nil {
+		return nil, err
+	}
+	if reader == nil {
+		return nil, fmt.Errorf("empty file reader")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(reader, maxIMOutboundImageBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		logger.Warnf(ctx, "[IM] Failed to close inline image reader: path=%s err=%v", span.Path, closeErr)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty image body")
+	}
+	if len(data) > maxIMOutboundImageBytes {
+		return nil, fmt.Errorf("image exceeds %d bytes", maxIMOutboundImageBytes)
+	}
+	return &OutboundImage{
+		FileName: imOutboundImageFileName(span.Path),
+		Caption:  strings.TrimSpace(span.Alt),
+		Data:     data,
+	}, nil
 }
 
 func (s *Service) extractIMOutboundImages(
@@ -156,6 +365,36 @@ func removeIMMarkdownImageSpans(content string, spans []imMarkdownImageSpan) str
 	}
 	b.WriteString(content[last:])
 	return strings.TrimSpace(imRemovedImageBlankLinesRe.ReplaceAllString(b.String(), "\n\n"))
+}
+
+func replaceIMMarkdownImageSpans(
+	content string,
+	spans []imMarkdownImageSpan,
+	replace func(imMarkdownImageSpan) (string, bool),
+) string {
+	if len(spans) == 0 {
+		return content
+	}
+
+	var b strings.Builder
+	last := 0
+	for _, span := range spans {
+		if span.Start < last || span.End > len(content) || span.Start >= span.End {
+			continue
+		}
+		replacement, ok := replace(span)
+		if !ok {
+			continue
+		}
+		b.WriteString(content[last:span.Start])
+		b.WriteString(replacement)
+		last = span.End
+	}
+	if last == 0 {
+		return content
+	}
+	b.WriteString(content[last:])
+	return b.String()
 }
 
 func scanIMMarkdownImages(markdown string) []imMarkdownImageSpan {

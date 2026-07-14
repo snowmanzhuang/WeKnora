@@ -170,6 +170,13 @@ type ImageSender interface {
 	SendImage(ctx context.Context, incoming *IncomingMessage, image *OutboundImage) error
 }
 
+// InlineImageUploader is an optional interface for adapters whose rich-text
+// format requires images to be uploaded before they can be referenced inline.
+// The returned reference replaces the original provider:// Markdown target.
+type InlineImageUploader interface {
+	UploadInlineImage(ctx context.Context, incoming *IncomingMessage, image *OutboundImage) (string, error)
+}
+
 // FileDownloader is an optional interface that adapters can implement to support
 // downloading file attachments from the IM platform. When the adapter implements
 // this interface and the IM channel has a knowledge_base_id configured, file

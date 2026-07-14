@@ -32,9 +32,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Compile-time check that Adapter implements im.StreamSender and im.FileDownloader.
+// Compile-time checks for optional IM capabilities.
 var _ im.StreamSender = (*Adapter)(nil)
 var _ im.FileDownloader = (*Adapter)(nil)
+var _ im.InlineImageUploader = (*Adapter)(nil)
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
@@ -452,8 +453,21 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 		return fmt.Errorf("get access token: %w", err)
 	}
 
+	replyContent := a.resolveMarkdownImages(ctx, accessToken, reply.Content)
+	if feishuInlineImageRe.MatchString(replyContent) {
+		cardID, cardErr := a.cardkitCreate(ctx, accessToken, buildStaticCardJSON(replyContent))
+		if cardErr == nil {
+			cardErr = a.sendCardByCardID(ctx, accessToken, incoming, cardID)
+		}
+		if cardErr == nil {
+			return nil
+		}
+		logger.Warnf(ctx, "[Feishu] Static image card failed, degrading to text: %v", cardErr)
+		replyContent = degradeFeishuInlineImages(replyContent)
+	}
+
 	// Build text message content
-	content, _ := json.Marshal(map[string]string{"text": reply.Content})
+	content, _ := json.Marshal(map[string]string{"text": replyContent})
 
 	// Reply payload (no receive_id — the path message_id locates the chat)
 	replyPayload := map[string]interface{}{
@@ -726,6 +740,30 @@ func buildStreamingCardJSON() string {
 	return string(b)
 }
 
+func buildStaticCardJSON(content string) string {
+	card := map[string]interface{}{
+		"schema": "2.0",
+		"config": map[string]interface{}{
+			"summary": map[string]string{"content": "WeKnora 回复"},
+		},
+		"header": map[string]interface{}{
+			"template": "blue",
+			"title":    map[string]string{"tag": "plain_text", "content": "WeKnora"},
+		},
+		"body": map[string]interface{}{
+			"elements": []map[string]interface{}{
+				{
+					"tag":       "markdown",
+					"content":   content,
+					"text_size": "normal",
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(card)
+	return string(b)
+}
+
 // StartStream creates a CardKit card entity, sends it as a message, and returns the card_id.
 func (a *Adapter) StartStream(ctx context.Context, incoming *im.IncomingMessage) (string, error) {
 	accessToken, err := a.getTenantAccessToken(ctx)
@@ -956,6 +994,10 @@ func (a *Adapter) cardkitUpdateElement(ctx context.Context, accessToken, cardID,
 // feishuMarkdownImageRe matches a markdown image whose target is an http(s) URL.
 var feishuMarkdownImageRe = regexp.MustCompile(`!\[([^\]]*)\]\((https?://[^)\s]+)\)`)
 
+// feishuInlineImageRe recognizes image references returned by Feishu's image
+// upload API. Card markdown accepts these keys but normal text messages do not.
+var feishuInlineImageRe = regexp.MustCompile(`!\[([^\]]*)\]\((img_[^)\s]+)\)`)
+
 // feishuMaxImageBytes caps the download size of an image before uploading to
 // Feishu (Feishu's limit is 10MB; keep a small margin).
 const feishuMaxImageBytes = 10 << 20
@@ -1005,7 +1047,7 @@ func (a *Adapter) resolveMarkdownImages(ctx context.Context, accessToken, conten
 // imageKeyForURL returns a Feishu image_key for the given URL, uploading it if
 // not already cached.
 func (a *Adapter) imageKeyForURL(ctx context.Context, accessToken, rawURL string) (string, error) {
-	key := imageCacheKey(rawURL)
+	key := a.appID + "\x00url\x00" + imageCacheKey(rawURL)
 
 	feishuImageKeyMu.Lock()
 	if v, ok := feishuImageKeyCache[key]; ok {
@@ -1056,13 +1098,71 @@ func (a *Adapter) uploadImageFromURL(ctx context.Context, accessToken, rawURL st
 	if len(imgData) > feishuMaxImageBytes {
 		return "", fmt.Errorf("image exceeds %d bytes", feishuMaxImageBytes)
 	}
+	return a.uploadImageBytes(ctx, accessToken, "image", imgData)
+}
+
+// UploadInlineImage uploads local storage bytes and returns the image_key used
+// as the Markdown target inside a Feishu card.
+func (a *Adapter) UploadInlineImage(
+	ctx context.Context,
+	_ *im.IncomingMessage,
+	image *im.OutboundImage,
+) (string, error) {
+	if image == nil || len(image.Data) == 0 {
+		return "", fmt.Errorf("image data is required")
+	}
+	if len(image.Data) > feishuMaxImageBytes {
+		return "", fmt.Errorf("image exceeds %d bytes", feishuMaxImageBytes)
+	}
+
+	accessToken, err := a.getTenantAccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+	digest := sha256.Sum256(image.Data)
+	cacheKey := fmt.Sprintf("%s\x00bytes\x00%x", a.appID, digest)
+
+	feishuImageKeyMu.Lock()
+	if imageKey, ok := feishuImageKeyCache[cacheKey]; ok {
+		feishuImageKeyMu.Unlock()
+		return imageKey, nil
+	}
+	feishuImageKeyMu.Unlock()
+
+	fileName := strings.TrimSpace(image.FileName)
+	if fileName == "" {
+		fileName = "image"
+	}
+	imageKey, err := a.uploadImageBytes(ctx, accessToken, fileName, image.Data)
+	if err != nil {
+		return "", err
+	}
+
+	feishuImageKeyMu.Lock()
+	feishuImageKeyCache[cacheKey] = imageKey
+	feishuImageKeyMu.Unlock()
+	return imageKey, nil
+}
+
+func (a *Adapter) uploadImageBytes(
+	ctx context.Context,
+	accessToken string,
+	fileName string,
+	imgData []byte,
+) (string, error) {
+	if len(imgData) == 0 {
+		return "", fmt.Errorf("empty image body")
+	}
+	if len(imgData) > feishuMaxImageBytes {
+		return "", fmt.Errorf("image exceeds %d bytes", feishuMaxImageBytes)
+	}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if err := writer.WriteField("image_type", "message"); err != nil {
 		return "", err
 	}
-	part, err := writer.CreateFormFile("image", "image")
+	part, err := writer.CreateFormFile("image", fileName)
 	if err != nil {
 		return "", err
 	}
@@ -1104,6 +1204,17 @@ func (a *Adapter) uploadImageFromURL(ctx context.Context, accessToken, rawURL st
 		return "", fmt.Errorf("upload image: empty image_key")
 	}
 	return result.Data.ImageKey, nil
+}
+
+func degradeFeishuInlineImages(content string) string {
+	return feishuInlineImageRe.ReplaceAllStringFunc(content, func(match string) string {
+		sub := feishuInlineImageRe.FindStringSubmatch(match)
+		label := strings.TrimSpace(sub[1])
+		if label == "" {
+			label = "图片"
+		}
+		return fmt.Sprintf("[图片：%s]", label)
+	})
 }
 
 // cardkitSetStreaming updates the card's streaming_mode setting.
