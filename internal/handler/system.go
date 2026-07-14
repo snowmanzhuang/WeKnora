@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/database"
+	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	modellimiter "github.com/Tencent/WeKnora/internal/models/limiter"
@@ -31,6 +32,10 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
+
+type runtimeKnowledgeCanceller interface {
+	CancelKnowledgeParse(ctx context.Context, knowledgeID string) (*types.Knowledge, error)
+}
 
 // SystemHandler handles system-related requests
 type SystemHandler struct {
@@ -49,6 +54,10 @@ type SystemHandler struct {
 	// Lite mode), so GetRuntimeQueues can distinguish "no queues in this
 	// deployment" from "queues are empty".
 	taskInspector interfaces.TaskInspector
+	// knowledgeSvc supplies the domain-level cancellation path used by the
+	// runtime task console. It updates business state and tracing before queue
+	// records are removed, unlike a raw Redis deletion.
+	knowledgeSvc runtimeKnowledgeCanceller
 }
 
 // NewSystemHandler creates a new system handler
@@ -60,6 +69,7 @@ func NewSystemHandler(cfg *config.Config,
 	systemSettingSvc interfaces.SystemSettingService,
 	auditSvc interfaces.AuditLogService,
 	taskInspector interfaces.TaskInspector,
+	knowledgeSvc interfaces.KnowledgeService,
 ) *SystemHandler {
 	return &SystemHandler{
 		cfg:              cfg,
@@ -70,6 +80,7 @@ func NewSystemHandler(cfg *config.Config,
 		systemSettingSvc: systemSettingSvc,
 		auditSvc:         auditSvc,
 		taskInspector:    taskInspector,
+		knowledgeSvc:     knowledgeSvc,
 	}
 }
 
@@ -1442,7 +1453,7 @@ func (h *SystemHandler) ResetUserPassword(c *gin.Context) {
 // ListSystemSettings godoc
 // @Summary      List all system settings
 // @Description  Return every row in the system_settings table (system-scope,
-// @Description  not tenant-scope). SystemAdmin only.
+// @Description  not workspace-scoped). SystemAdmin only.
 // @Tags         System Admin
 // @Produce      json
 // @Success      200 {array} types.SystemSetting "list of settings"
@@ -1593,6 +1604,280 @@ func (h *SystemHandler) GetRuntimeQueues(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+type RuntimeTasksResponse struct {
+	Available  bool                    `json:"available"`
+	Tasks      []types.RuntimeTaskInfo `json:"tasks"`
+	PageSize   int                     `json:"page_size"`
+	HasMore    bool                    `json:"has_more"`
+	NextCursor string                  `json:"next_cursor,omitempty"`
+}
+
+func isKnownRuntimeQueue(name string) bool {
+	for _, definition := range types.QueueDefinitions() {
+		if definition.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeTaskPageSize(c *gin.Context) int {
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return pageSize
+}
+
+func (h *SystemHandler) listRuntimeTasks(c *gin.Context, state types.RuntimeTaskState) {
+	queue := c.Param("queue")
+	if !isKnownRuntimeQueue(queue) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown task queue"})
+		return
+	}
+	if !state.Valid() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown task state"})
+		return
+	}
+	pageSize := runtimeTaskPageSize(c)
+	cursor := c.Query("cursor")
+	inspector, ok := h.taskInspector.(interfaces.RuntimeTaskInspector)
+	if !ok {
+		c.JSON(http.StatusOK, RuntimeTasksResponse{
+			Available: false,
+			Tasks:     []types.RuntimeTaskInfo{},
+			PageSize:  pageSize,
+		})
+		return
+	}
+	page, supported, err := inspector.ListRuntimeTasks(c.Request.Context(), queue, state, cursor, pageSize)
+	if err != nil {
+		if errors.Is(err, types.ErrInvalidRuntimeTaskCursor) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid task list cursor",
+				"code":  "runtime_task_cursor_invalid",
+			})
+			return
+		}
+		if errors.Is(err, types.ErrExpiredRuntimeTaskCursor) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Task list changed; refresh from the beginning",
+				"code":  "runtime_task_cursor_expired",
+			})
+			return
+		}
+		logger.Errorf(c.Request.Context(), "list runtime queue tasks queue=%s state=%s: %v", queue, state, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list queue tasks"})
+		return
+	}
+	if page.Tasks == nil {
+		page.Tasks = []types.RuntimeTaskInfo{}
+	}
+	c.JSON(http.StatusOK, RuntimeTasksResponse{
+		Available:  supported,
+		Tasks:      page.Tasks,
+		PageSize:   pageSize,
+		HasMore:    page.HasMore,
+		NextCursor: page.NextCursor,
+	})
+}
+
+// ListRuntimeTasks returns one live task-state page for the unified operator
+// drawer. Raw task payloads are never included.
+// @Summary      List runtime queue tasks by state
+// @Tags         System Admin
+// @Produce      json
+// @Param        queue path string true "Queue name"
+// @Param        state query string true "Task state" Enums(pending,active,scheduled,retry,archived,completed)
+// @Param        cursor query string false "Opaque continuation cursor"
+// @Param        page_size query int false "Page size" default(20)
+// @Success      200 {object} RuntimeTasksResponse
+// @Router       /system/admin/runtime/queues/{queue}/tasks [get]
+func (h *SystemHandler) ListRuntimeTasks(c *gin.Context) {
+	h.listRuntimeTasks(c, types.RuntimeTaskState(c.Query("state")))
+}
+
+func (h *SystemHandler) emitQueueTaskAudit(
+	ctx context.Context,
+	action types.AuditAction,
+	queue, taskID string,
+	extra map[string]string,
+) {
+	if h.auditSvc == nil {
+		return
+	}
+	actorID, _ := types.UserIDFromContext(ctx)
+	detailMap := map[string]string{"queue": queue, "task_id": taskID}
+	for key, value := range extra {
+		detailMap[key] = value
+	}
+	details, _ := json.Marshal(detailMap)
+	targetType := "queue_task"
+	targetID := taskID
+	if targetID == "" {
+		targetType = "task_queue"
+		targetID = queue
+	}
+	_ = h.auditSvc.Log(ctx, &types.AuditLog{
+		TenantID:    0,
+		ActorUserID: actorID,
+		ActorRole:   "system_admin",
+		Action:      action,
+		TargetType:  targetType,
+		TargetID:    targetID,
+		Outcome:     types.AuditOutcomeSuccess,
+		Details:     types.JSON(details),
+	})
+}
+
+func runtimeTaskParams(c *gin.Context) (string, string, bool) {
+	queue := c.Param("queue")
+	taskID := c.Param("task_id")
+	if !isKnownRuntimeQueue(queue) || taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid queue or task ID"})
+		return "", "", false
+	}
+	return queue, taskID, true
+}
+
+func (h *SystemHandler) mutateRuntimeTask(c *gin.Context, action types.RuntimeTaskAction) {
+	queue, taskID, ok := runtimeTaskParams(c)
+	if !ok {
+		return
+	}
+	inspector, supported := h.taskInspector.(interfaces.RuntimeTaskInspector)
+	if !supported {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Task queue is unavailable"})
+		return
+	}
+	task, available, err := inspector.GetRuntimeTask(c.Request.Context(), queue, taskID)
+	if !available {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Task queue is unavailable"})
+		return
+	}
+	if err != nil || task == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Task is no longer available"})
+		return
+	}
+	if !task.Allows(action) {
+		c.JSON(http.StatusConflict, gin.H{"error": "Action is not allowed for the current task state"})
+		return
+	}
+
+	var auditAction types.AuditAction
+	auditDetails := map[string]string{
+		"task_type":  task.Type,
+		"from_state": string(task.State),
+		"action":     string(action),
+	}
+	switch action {
+	case types.RuntimeTaskActionCancel:
+		if h.knowledgeSvc == nil || task.TenantID == 0 || task.KnowledgeID == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Business cancellation is unavailable"})
+			return
+		}
+		cancelCtx := context.WithValue(c.Request.Context(), types.TenantIDContextKey, task.TenantID)
+		if _, err = h.knowledgeSvc.CancelKnowledgeParse(cancelCtx, task.KnowledgeID); err != nil {
+			if isKnowledgeGone(err) {
+				if h.purgeOrphanRuntimeTask(c.Request.Context(), inspector, queue, taskID, task.KnowledgeID) {
+					logger.Warnf(c.Request.Context(),
+						"cancel runtime queue task queue=%s task=%s: knowledge gone, purged queue record",
+						queue, taskID)
+					auditDetails["orphan_purge"] = "true"
+					auditAction = types.AuditActionSystemQueueTaskCancelled
+					break
+				}
+			}
+			logger.Errorf(c.Request.Context(), "cancel runtime queue task queue=%s task=%s: %v", queue, taskID, err)
+			c.JSON(http.StatusConflict, gin.H{"error": "Task can no longer be cancelled"})
+			return
+		}
+		auditAction = types.AuditActionSystemQueueTaskCancelled
+	case types.RuntimeTaskActionRunNow:
+		available, err = inspector.RunRuntimeTask(c.Request.Context(), queue, taskID)
+		if !available {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Task queue is unavailable"})
+			return
+		}
+		if err != nil {
+			logger.Errorf(c.Request.Context(), "run queue task now queue=%s task=%s: %v", queue, taskID, err)
+			c.JSON(http.StatusConflict, gin.H{"error": "Task is no longer available to run"})
+			return
+		}
+		auditAction = types.AuditActionSystemQueueTaskRunNow
+	case types.RuntimeTaskActionDelete:
+		available, err = inspector.DeleteRuntimeTask(c.Request.Context(), queue, taskID)
+		if !available {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Task queue is unavailable"})
+			return
+		}
+		if err != nil {
+			logger.Errorf(c.Request.Context(), "delete queue task queue=%s task=%s: %v", queue, taskID, err)
+			c.JSON(http.StatusConflict, gin.H{"error": "Task is no longer available for deletion"})
+			return
+		}
+		auditAction = types.AuditActionSystemQueueTaskDeleted
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown task action"})
+		return
+	}
+	h.emitQueueTaskAudit(c.Request.Context(), auditAction, queue, taskID, auditDetails)
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func isKnowledgeGone(err error) bool {
+	if errors.Is(err, repository.ErrKnowledgeNotFound) {
+		return true
+	}
+	var appErr *apperrors.AppError
+	return errors.As(err, &appErr) && appErr.Code == apperrors.ErrNotFound
+}
+
+// purgeOrphanRuntimeTask removes queue records for a task whose knowledge row
+// is already gone. CancelTasksForKnowledge sweeps sibling tasks best-effort;
+// success is reported only once the requested task ID is gone.
+func (h *SystemHandler) purgeOrphanRuntimeTask(
+	ctx context.Context,
+	inspector interfaces.RuntimeTaskInspector,
+	queue, taskID, knowledgeID string,
+) bool {
+	if h.taskInspector != nil && knowledgeID != "" {
+		if _, _, err := h.taskInspector.CancelTasksForKnowledge(ctx, knowledgeID); err != nil {
+			logger.Warnf(ctx, "purge orphan tasks for knowledge %s: %v", knowledgeID, err)
+		}
+	}
+	supported, err := inspector.ForceDeleteRuntimeTask(ctx, queue, taskID)
+	if !supported {
+		return false
+	}
+	if err == nil {
+		return true
+	}
+	// The knowledge-wide sweep may have already removed this task ID.
+	if _, available, getErr := inspector.GetRuntimeTask(ctx, queue, taskID); available && getErr != nil {
+		return true
+	}
+	logger.Warnf(ctx, "force delete orphan task queue=%s task=%s: %v", queue, taskID, err)
+	return false
+}
+
+// MutateRuntimeTask executes a backend-advertised action after re-reading the
+// current task state to close click/race windows.
+// @Summary      Run a safe runtime task action
+// @Tags         System Admin
+// @Produce      json
+// @Param        queue path string true "Queue name"
+// @Param        task_id path string true "Task ID"
+// @Param        action path string true "Action" Enums(cancel,run_now,delete)
+// @Success      200 {object} map[string]bool
+// @Router       /system/admin/runtime/queues/{queue}/tasks/{task_id}/actions/{action} [post]
+func (h *SystemHandler) MutateRuntimeTask(c *gin.Context) {
+	h.mutateRuntimeTask(c, types.RuntimeTaskAction(c.Param("action")))
+}
+
 func (h *SystemHandler) ListSystemSettings(c *gin.Context) {
 	ctx := logger.CloneContext(c.Request.Context())
 	rows, err := h.systemSettingSvc.List(ctx)
@@ -1740,11 +2025,11 @@ func (h *SystemHandler) UpdateSystemSetting(c *gin.Context) {
 }
 
 // ApplyDefaultStorageQuotaToAllTenants godoc
-// @Summary      Apply the default storage quota to every existing tenant
+// @Summary      Apply the default storage quota to every existing workspace
 // @Description  Reads the current value of `tenant.default_storage_quota_gb`
 // @Description  (3-tier resolver: DB > ENV > default) and writes that many
 // @Description  GiB into storage_quota for every row in tenants. Bypasses
-// @Description  the per-tenant PUT whitelist, which forbids storage_quota
+// @Description  the per-workspace PUT whitelist, which forbids storage_quota
 // @Description  edits by Owners. SystemAdmin only.
 // @Description  Idempotent — running twice with the same setting is a no-op.
 // @Tags         System Admin

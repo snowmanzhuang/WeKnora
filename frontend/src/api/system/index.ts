@@ -71,7 +71,7 @@ export interface ParserEngineInfo {
   UnavailableReason?: string
 }
 
-/** 解析引擎配置（引擎相关存租户；docreader 地址由环境变量配置） */
+/** 解析引擎配置（引擎相关存空间；docreader 地址由环境变量配置） */
 export interface ParserEngineConfig {
   docreader_addr?: string
   docreader_transport?: string
@@ -130,7 +130,7 @@ export function reconnectDocReader(addr: string): Promise<ParserEnginesResponse 
   return post('/api/v1/system/docreader/reconnect', { addr })
 }
 
-// ---- 存储引擎配置（租户级，供文档/图片存储与 docreader 使用） ----
+// ---- 存储引擎配置（空间级，供文档/图片存储与 docreader 使用） ----
 
 export interface StorageEngineConfig {
   default_provider: string // "local" | "minio" | "cos" | "tos" | "s3" | "oss" | "ks3" | "obs"
@@ -555,6 +555,47 @@ export interface RuntimeQueuesResponse {
   timestamp: number
 }
 
+export type RuntimeTaskState = 'pending' | 'active' | 'scheduled' | 'retry' | 'archived' | 'completed'
+export type RuntimeTaskAction = 'cancel' | 'run_now' | 'delete'
+
+export interface RuntimeTask {
+  id: string
+  queue: string
+  type: string
+  state: RuntimeTaskState
+  allowed_actions: RuntimeTaskAction[]
+  last_error?: string
+  last_failed_at?: string
+  next_process_at?: string
+  started_at?: string
+  completed_at?: string
+  deadline?: string
+  enqueued_at?: string
+  retried: number
+  max_retry: number
+  is_orphaned?: boolean
+  worker?: string
+  tenant_id?: number
+  knowledge_base_id?: string
+  knowledge_id?: string
+  task_id?: string
+  source_id?: string
+  target_id?: string
+  source_kb_id?: string
+  target_kb_id?: string
+  data_source_id?: string
+  sync_log_id?: string
+  knowledge_count?: number
+}
+
+export interface RuntimeTasksResponse {
+  available: boolean
+  tasks: RuntimeTask[]
+  page_size: number
+  has_more: boolean
+  next_cursor?: string
+}
+
 /**
  * Fetch the live asynq queue depths + worker-pool concurrency.
  * Backend: GET /api/v1/system/admin/runtime/queues (SystemAdmin only).
@@ -564,4 +605,25 @@ export interface RuntimeQueuesResponse {
 export async function getRuntimeQueues(): Promise<RuntimeQueuesResponse> {
   const response = await get('/api/v1/system/admin/runtime/queues')
   return response as unknown as RuntimeQueuesResponse
+}
+
+export async function getRuntimeTasks(
+  queue: string,
+  state: RuntimeTaskState,
+  cursor = '',
+  pageSize = 20,
+): Promise<RuntimeTasksResponse> {
+  return get(`/api/v1/system/admin/runtime/queues/${encodeURIComponent(queue)}/tasks`, {
+    params: { state, ...(cursor ? { cursor } : {}), page_size: pageSize },
+  })
+}
+
+export async function mutateRuntimeTask(
+  queue: string,
+  taskID: string,
+  action: RuntimeTaskAction,
+): Promise<void> {
+  await post(
+    `/api/v1/system/admin/runtime/queues/${encodeURIComponent(queue)}/tasks/${encodeURIComponent(taskID)}/actions/${encodeURIComponent(action)}`,
+  )
 }

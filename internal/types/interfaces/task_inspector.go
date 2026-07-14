@@ -63,3 +63,24 @@ type TaskInspector interface {
 	// capacity and busy workers for each configured pool.
 	WorkerServerStats(ctx context.Context) (stats []types.WorkerServerStat, supported bool, err error)
 }
+
+// RuntimeTaskInspector is the optional operator surface implemented by queue
+// backends that retain inspectable task state. It is separate from
+// TaskInspector so Lite mode and light-weight tests do not need to implement
+// queue mutations.
+type RuntimeTaskInspector interface {
+	ListRuntimeTasks(
+		ctx context.Context,
+		queue string,
+		state types.RuntimeTaskState,
+		cursor string,
+		pageSize int,
+	) (page types.RuntimeTaskPage, supported bool, err error)
+	GetRuntimeTask(ctx context.Context, queue, taskID string) (task *types.RuntimeTaskInfo, supported bool, err error)
+	RunRuntimeTask(ctx context.Context, queue, taskID string) (supported bool, err error)
+	DeleteRuntimeTask(ctx context.Context, queue, taskID string) (supported bool, err error)
+	// ForceDeleteRuntimeTask removes a queue record without checking the
+	// operator-facing AllowedActions. Used when the business row is already
+	// gone but a retry/pending task survived (orphan cleanup).
+	ForceDeleteRuntimeTask(ctx context.Context, queue, taskID string) (supported bool, err error)
+}
