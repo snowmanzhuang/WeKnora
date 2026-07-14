@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const promptTemplate = readFileSync(resolve(root, 'config/prompt_templates/system_prompt.yaml'), 'utf8');
 const migration = readFileSync(
-  resolve(root, 'migrations/versioned/000065_builtin_quick_answer_default_prompt.up.sql'),
+  resolve(root, 'migrations/versioned/000067_builtin_quick_answer_default_prompt.up.sql'),
   'utf8',
 );
 

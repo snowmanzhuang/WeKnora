@@ -40,7 +40,7 @@ func TestDefaultKBPromptAndMigrationSeedQuickAnswerPrompt(t *testing.T) {
 		}
 	}
 
-	migrationPath := filepath.Join(repoRoot, "migrations", "versioned", "000065_builtin_quick_answer_default_prompt.up.sql")
+	migrationPath := filepath.Join(repoRoot, "migrations", "versioned", "000067_builtin_quick_answer_default_prompt.up.sql")
 	migrationBytes, err := os.ReadFile(migrationPath)
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
