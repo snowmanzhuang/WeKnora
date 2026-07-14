@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	agentmemory "github.com/Tencent/WeKnora/internal/agent/memory"
 	agenttools "github.com/Tencent/WeKnora/internal/agent/tools"
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/event"
@@ -389,6 +390,21 @@ func (e *AgentEngine) callLLMWithRetry(
 			}
 		}
 	}
+	if err != nil && e.activateFallbackChatModel(ctx, err) {
+		response, err = e.streamThinkingToEventBus(ctx, messages, tools, iteration, sessionID)
+		if err != nil && isTransientError(err) {
+			for retry := 1; retry <= maxLLMRetries; retry++ {
+				retryDelay := time.Duration(retry) * time.Second
+				logger.Warnf(ctx, "[Agent][Round-%d] fallback LLM transient error (attempt %d/%d), retrying in %v: %v",
+					round, retry, maxLLMRetries, retryDelay, err)
+				time.Sleep(retryDelay)
+				response, err = e.streamThinkingToEventBus(ctx, messages, tools, iteration, sessionID)
+				if err == nil || !isTransientError(err) {
+					break
+				}
+			}
+		}
+	}
 	if err != nil {
 		logger.Errorf(ctx, "[Agent][Round-%d] LLM call failed: %v", round, err)
 		common.PipelineError(ctx, "Agent", "think_failed", map[string]interface{}{
@@ -451,4 +467,30 @@ func (e *AgentEngine) callLLMWithRetry(
 	}
 
 	return response, nil
+}
+
+func (e *AgentEngine) activateFallbackChatModel(ctx context.Context, cause error) bool {
+	if e.fallbackChatModel == nil || !chat.ShouldFailover(ctx, cause) {
+		return false
+	}
+	primaryModelID := ""
+	if e.chatModel != nil {
+		primaryModelID = e.chatModel.GetModelID()
+	}
+	fallbackModel := e.fallbackChatModel
+	e.chatModel = fallbackModel
+	e.fallbackChatModel = nil
+	if e.config.MaxContextTokens > 0 {
+		e.memoryConsolidator = agentmemory.NewConsolidator(
+			fallbackModel, e.tokenEstimator, e.config.MaxContextTokens, 0,
+		)
+	}
+	logger.Warnf(ctx, "[Agent] Activating fallback chat model: primary=%s fallback=%s error=%v",
+		primaryModelID, fallbackModel.GetModelID(), cause)
+	common.PipelineWarn(ctx, "Agent", "fallback_model_activate", map[string]interface{}{
+		"primary_model":  primaryModelID,
+		"fallback_model": fallbackModel.GetModelID(),
+		"error":          cause.Error(),
+	})
+	return true
 }

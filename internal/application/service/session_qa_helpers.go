@@ -129,6 +129,34 @@ func (s *sessionService) resolveChatModelID(
 	return s.selectChatModelID(ctx, session, knowledgeBaseIDs, knowledgeIDs)
 }
 
+// resolveFallbackChatModel validates the agent's optional fallback model and
+// returns its vision capability for request-specific message shaping. Invalid
+// fallback configuration never prevents the primary model from running.
+func (s *sessionService) resolveFallbackChatModel(
+	ctx context.Context,
+	customAgent *types.CustomAgent,
+	primaryModelID string,
+) (string, bool) {
+	if customAgent == nil {
+		return "", false
+	}
+	fallbackModelID := strings.TrimSpace(customAgent.Config.FallbackModelID)
+	if fallbackModelID == "" {
+		return "", false
+	}
+	if fallbackModelID == strings.TrimSpace(primaryModelID) {
+		logger.Warnf(ctx, "Ignoring fallback model because it matches the primary model: %s", fallbackModelID)
+		return "", false
+	}
+
+	model, err := s.modelService.GetModelByID(ctx, fallbackModelID)
+	if err != nil || model == nil || model.Type != types.ModelTypeKnowledgeQA {
+		logger.Warnf(ctx, "Ignoring unavailable fallback chat model %s", fallbackModelID)
+		return "", false
+	}
+	return fallbackModelID, model.Parameters.SupportsVision
+}
+
 // resolveRetrievalTenantID determines the tenant ID to use for retrieval scope.
 // Priority: agent's tenant > context tenant > session tenant.
 func (s *sessionService) resolveRetrievalTenantID(
@@ -226,7 +254,6 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 		logger.Infof(ctx, "Using custom agent's query_understand_model_id: %s",
 			customAgent.Config.QueryUnderstandModelID)
 	}
-
 	// Override fallback settings
 	if customAgent.Config.FallbackStrategy != "" {
 		cm.FallbackStrategy = types.FallbackStrategy(customAgent.Config.FallbackStrategy)

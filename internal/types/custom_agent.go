@@ -115,6 +115,8 @@ type CustomAgentConfig struct {
 	// ===== Model Settings =====
 	// Model ID to use for conversations
 	ModelID string `yaml:"model_id" json:"model_id"`
+	// Optional chat model used when the primary model is unavailable.
+	FallbackModelID string `yaml:"fallback_model_id" json:"fallback_model_id,omitempty"`
 	// ReRank model ID for retrieval
 	RerankModelID string `yaml:"rerank_model_id" json:"rerank_model_id"`
 	// Temperature for LLM (0-1)

@@ -2,7 +2,9 @@ package chatpipeline
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
@@ -41,9 +43,22 @@ func (p *PluginChatCompletion) OnEvent(
 	})
 
 	// Prepare chat model and options
+	usingFallback := false
 	chatModel, opt, err := prepareChatModel(ctx, p.modelService, chatManage)
 	if err != nil {
-		return ErrGetChatModel.WithError(err)
+		if chatManage.FallbackModelID == "" || !chat.ShouldFailover(ctx, err) {
+			return ErrGetChatModel.WithError(err)
+		}
+		pipelineWarn(ctx, "Completion", "fallback_model_activate", map[string]interface{}{
+			"primary_model":  chatManage.ChatModelID,
+			"fallback_model": chatManage.FallbackModelID,
+			"error":          err.Error(),
+		})
+		chatModel, opt, err = prepareFallbackChatModel(ctx, p.modelService, chatManage)
+		if err != nil {
+			return ErrGetChatModel.WithError(fmt.Errorf("primary model unavailable and fallback initialization failed: %w", err))
+		}
+		usingFallback = true
 	}
 
 	// Prepare messages including conversation history
@@ -51,25 +66,31 @@ func (p *PluginChatCompletion) OnEvent(
 		"message_count": len(chatManage.History) + 2,
 	})
 	chatMessages := prepareMessagesWithHistory(chatManage)
+	activeModelID := chatManage.ChatModelID
+	if usingFallback {
+		activeModelID = chatManage.FallbackModelID
+		chatMessages = prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+	}
 
 	// Call the chat model to generate response
 	pipelineInfo(ctx, "Completion", "model_call", map[string]interface{}{
 		"chat_model": chatManage.ChatModelID,
 	})
-	var chatResponse *types.ChatResponse
-	for attempt := 1; attempt <= chatCompletionMaxAttempts; attempt++ {
-		chatResponse, err = chatModel.Chat(ctx, chatMessages, opt)
-		if err == nil || !isRetryableChatModelError(ctx, err) || attempt == chatCompletionMaxAttempts {
-			break
-		}
-		pipelineWarn(ctx, "Completion", "model_call_retry", map[string]interface{}{
-			"chat_model": chatManage.ChatModelID,
-			"attempt":    attempt,
-			"max":        chatCompletionMaxAttempts,
-			"error":      err.Error(),
+	chatResponse, err := callChatModelWithRetry(ctx, chatModel, activeModelID, chatMessages, opt)
+	if err != nil && !usingFallback && chatManage.FallbackModelID != "" && chat.ShouldFailover(ctx, err) {
+		pipelineWarn(ctx, "Completion", "fallback_model_activate", map[string]interface{}{
+			"primary_model":  chatManage.ChatModelID,
+			"fallback_model": chatManage.FallbackModelID,
+			"error":          err.Error(),
 		})
-		if !sleepBeforeChatRetry(ctx, attempt) {
-			break
+		fallbackModel, fallbackOpt, fallbackErr := prepareFallbackChatModel(ctx, p.modelService, chatManage)
+		if fallbackErr == nil {
+			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+			chatResponse, err = callChatModelWithRetry(
+				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
+			)
+		} else {
+			err = fmt.Errorf("primary model failed and fallback initialization failed: %v: %w", err, fallbackErr)
 		}
 	}
 	if err != nil {
@@ -89,4 +110,31 @@ func (p *PluginChatCompletion) OnEvent(
 	warnIfAnswerMissingKBCitations(ctx, "Completion", chatManage, chatResponse.Content)
 	chatManage.ChatResponse = chatResponse
 	return next()
+}
+
+func callChatModelWithRetry(
+	ctx context.Context,
+	model chat.Chat,
+	modelID string,
+	messages []chat.Message,
+	opt *chat.ChatOptions,
+) (*types.ChatResponse, error) {
+	var response *types.ChatResponse
+	var err error
+	for attempt := 1; attempt <= chatCompletionMaxAttempts; attempt++ {
+		response, err = model.Chat(ctx, messages, opt)
+		if err == nil || !isRetryableChatModelError(ctx, err) || attempt == chatCompletionMaxAttempts {
+			break
+		}
+		pipelineWarn(ctx, "Completion", "model_call_retry", map[string]interface{}{
+			"chat_model": modelID,
+			"attempt":    attempt,
+			"max":        chatCompletionMaxAttempts,
+			"error":      err.Error(),
+		})
+		if !sleepBeforeChatRetry(ctx, attempt) {
+			break
+		}
+	}
+	return response, err
 }

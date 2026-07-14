@@ -35,6 +35,7 @@ type AgentEngine struct {
 	config               *types.AgentConfig
 	toolRegistry         *agenttools.ToolRegistry
 	chatModel            chat.Chat
+	fallbackChatModel    chat.Chat
 	eventBus             *event.EventBus
 	knowledgeBasesInfo   []*KnowledgeBaseInfo      // Detailed knowledge base information for prompt
 	selectedDocs         []*SelectedDocumentInfo   // User-selected documents (via @ mention)
@@ -159,6 +160,16 @@ func (e *AgentEngine) SetAppConfig(cfg *appconfig.Config) {
 // This follows the same pattern as Handler.analyzeImageAttachments() in the handler layer.
 func (e *AgentEngine) SetImageDescriber(fn ImageDescriberFunc) {
 	e.imageDescriber = fn
+}
+
+// SetFallbackChatModel configures a request-scoped backup for core agent LLM
+// calls. It is activated only after the primary model fails before producing a
+// usable answer or tool call.
+func (e *AgentEngine) SetFallbackChatModel(model chat.Chat) {
+	if model == nil || e.chatModel == nil || model.GetModelID() == e.chatModel.GetModelID() {
+		return
+	}
+	e.fallbackChatModel = model
 }
 
 // SetSkillsManager sets the skills manager for the engine

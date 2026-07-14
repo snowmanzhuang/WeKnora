@@ -25,11 +25,13 @@ type PipelineRequest struct {
 	RerankThreshold float64 `json:"rerank_threshold"`
 
 	// Chat model parameters
-	ChatModelID      string           `json:"chat_model_id"`
-	SummaryConfig    SummaryConfig    `json:"summary_config"`
-	FallbackStrategy FallbackStrategy `json:"fallback_strategy"`
-	FallbackResponse string           `json:"fallback_response"`
-	FallbackPrompt   string           `json:"fallback_prompt"`
+	ChatModelID            string           `json:"chat_model_id"`
+	FallbackModelID        string           `json:"fallback_chat_model_id,omitempty"`
+	FallbackSupportsVision bool             `json:"-"`
+	SummaryConfig          SummaryConfig    `json:"summary_config"`
+	FallbackStrategy       FallbackStrategy `json:"fallback_strategy"`
+	FallbackResponse       string           `json:"fallback_response"`
+	FallbackPrompt         string           `json:"fallback_prompt"`
 
 	// Rewrite parameters
 	EnableRewrite        bool   `json:"enable_rewrite"`
@@ -206,6 +208,8 @@ func (c *ChatManage) Clone() *ChatManage {
 			RerankTopK:               c.RerankTopK,
 			RerankThreshold:          c.RerankThreshold,
 			ChatModelID:              c.ChatModelID,
+			FallbackModelID:          c.FallbackModelID,
+			FallbackSupportsVision:   c.FallbackSupportsVision,
 			SummaryConfig:            c.SummaryConfig,
 			FallbackStrategy:         c.FallbackStrategy,
 			FallbackResponse:         c.FallbackResponse,

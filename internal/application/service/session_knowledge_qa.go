@@ -55,6 +55,7 @@ func (s *sessionService) KnowledgeQA(
 	if err != nil {
 		return err
 	}
+	fallbackChatModelID, fallbackChatModelSupportsVision := s.resolveFallbackChatModel(ctx, req.CustomAgent, chatModelID)
 
 	// Initialize ChatManage defaults from config.yaml
 	summaryConfig := types.SummaryConfig{
@@ -121,6 +122,8 @@ func (s *sessionService) KnowledgeQA(
 			RerankTopK:              s.cfg.Conversation.RerankTopK,
 			RerankThreshold:         s.cfg.Conversation.RerankThreshold,
 			ChatModelID:             chatModelID,
+			FallbackModelID:         fallbackChatModelID,
+			FallbackSupportsVision:  fallbackChatModelSupportsVision,
 			SummaryConfig:           summaryConfig,
 			FallbackStrategy:        fallbackStrategy,
 			FallbackResponse:        s.cfg.Conversation.FallbackResponse,

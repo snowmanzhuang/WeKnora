@@ -68,7 +68,8 @@ func (m *streamTestChatModel) GetModelName() string { return "stream-test" }
 func (m *streamTestChatModel) GetModelID() string   { return "stream-test" }
 
 type streamTestModelService struct {
-	chatModel chat.Chat
+	chatModel  chat.Chat
+	chatModels map[string]chat.Chat
 }
 
 func (s *streamTestModelService) CreateModel(context.Context, *types.Model) error { return nil }
@@ -102,7 +103,14 @@ func (s *streamTestModelService) GetEmbeddingModelForTenant(
 func (s *streamTestModelService) GetRerankModel(context.Context, string) (rerank.Reranker, error) {
 	return nil, nil
 }
-func (s *streamTestModelService) GetChatModel(context.Context, string) (chat.Chat, error) {
+func (s *streamTestModelService) GetChatModel(_ context.Context, modelID string) (chat.Chat, error) {
+	if s.chatModels != nil {
+		model, ok := s.chatModels[modelID]
+		if !ok {
+			return nil, errors.New("chat model not found: " + modelID)
+		}
+		return model, nil
+	}
 	return s.chatModel, nil
 }
 func (s *streamTestModelService) GetVLMModel(context.Context, string) (vlm.VLM, error) {
@@ -200,6 +208,40 @@ func TestChatCompletionDoesNotRetryPermanentError(t *testing.T) {
 	}
 }
 
+func TestChatCompletionFallsBackAfterPrimaryRetries(t *testing.T) {
+	disableChatRetrySleep(t)
+	primary := &streamTestChatModel{
+		chatErrs: []error{
+			errors.New("API request failed with status 503: service unavailable"),
+			errors.New("API request failed with status 503: service unavailable"),
+			errors.New("API request failed with status 503: service unavailable"),
+		},
+	}
+	fallback := &streamTestChatModel{
+		chatResponses: []*types.ChatResponse{{Content: "备用模型答案", FinishReason: "stop"}},
+	}
+	plugin := &PluginChatCompletion{
+		modelService: &streamTestModelService{chatModels: map[string]chat.Chat{
+			"model-1":        primary,
+			"fallback-model": fallback,
+		}},
+	}
+	cm := testChatManage(nil)
+	cm.FallbackModelID = "fallback-model"
+
+	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION, cm, func() *PluginError {
+		return nil
+	}); err != nil {
+		t.Fatalf("OnEvent returned error: %v", err)
+	}
+
+	assertChatCalls(t, primary, 3)
+	assertChatCalls(t, fallback, 1)
+	if cm.ChatResponse == nil || cm.ChatResponse.Content != "备用模型答案" {
+		t.Fatalf("ChatResponse = %#v, want fallback response", cm.ChatResponse)
+	}
+}
+
 func TestChatCompletionStreamRetriesTransientErrorBeforeOutput(t *testing.T) {
 	disableChatRetrySleep(t)
 	model := &streamTestChatModel{
@@ -233,6 +275,89 @@ func TestChatCompletionStreamRetriesTransientErrorBeforeOutput(t *testing.T) {
 	}
 	if answer != "重试后流式答案" {
 		t.Fatalf("answer = %q, want retry answer", answer)
+	}
+}
+
+func TestChatCompletionStreamFallsBackBeforeOutput(t *testing.T) {
+	disableChatRetrySleep(t)
+	primaryError := types.StreamResponse{
+		ResponseType: types.ResponseTypeError,
+		Content:      "API request failed with status 503: service unavailable",
+		Done:         true,
+	}
+	primary := &streamTestChatModel{
+		streamSequences: [][]types.StreamResponse{{primaryError}, {primaryError}, {primaryError}},
+	}
+	fallback := &streamTestChatModel{
+		responses: []types.StreamResponse{
+			{ResponseType: types.ResponseTypeAnswer, Content: "流式备用答案"},
+			{ResponseType: types.ResponseTypeAnswer, Done: true, FinishReason: "stop"},
+		},
+	}
+	service := &streamTestModelService{chatModels: map[string]chat.Chat{
+		"model-1":        primary,
+		"fallback-model": fallback,
+	}}
+
+	answer := runStreamPluginAndWaitForAnswerWithService(t, service, func(cm *types.ChatManage) {
+		cm.FallbackModelID = "fallback-model"
+	})
+
+	if primary.streamCalls != 3 {
+		t.Fatalf("primary ChatStream calls = %d, want 3", primary.streamCalls)
+	}
+	if fallback.streamCalls != 1 {
+		t.Fatalf("fallback ChatStream calls = %d, want 1", fallback.streamCalls)
+	}
+	if answer != "流式备用答案" {
+		t.Fatalf("answer = %q, want fallback answer", answer)
+	}
+}
+
+func TestChatCompletionStreamDoesNotFallbackAfterOutput(t *testing.T) {
+	disableChatRetrySleep(t)
+	primary := &streamTestChatModel{responses: []types.StreamResponse{
+		{ResponseType: types.ResponseTypeAnswer, Content: "已输出部分"},
+		{ResponseType: types.ResponseTypeError, Content: "API request failed with status 503", Done: true},
+	}}
+	fallback := &streamTestChatModel{responses: []types.StreamResponse{
+		{ResponseType: types.ResponseTypeAnswer, Content: "不应输出", Done: true},
+	}}
+	service := &streamTestModelService{chatModels: map[string]chat.Chat{
+		"model-1":        primary,
+		"fallback-model": fallback,
+	}}
+
+	bus := event.NewEventBus()
+	errCh := make(chan event.ErrorData, 1)
+	bus.On(event.EventError, func(_ context.Context, evt event.Event) error {
+		data, ok := evt.Data.(event.ErrorData)
+		if !ok {
+			t.Fatalf("unexpected error event data type %T", evt.Data)
+		}
+		errCh <- data
+		return nil
+	})
+	cm := testChatManage(bus.AsEventBusInterface())
+	cm.FallbackModelID = "fallback-model"
+	plugin := &PluginChatCompletionStream{modelService: service}
+
+	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION_STREAM, cm, func() *PluginError {
+		return nil
+	}); err != nil {
+		t.Fatalf("OnEvent returned error: %v", err)
+	}
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for terminal error event")
+	}
+
+	if primary.streamCalls != 1 {
+		t.Fatalf("primary ChatStream calls = %d, want 1", primary.streamCalls)
+	}
+	if fallback.streamCalls != 0 {
+		t.Fatalf("fallback ChatStream calls = %d, want 0 after output started", fallback.streamCalls)
 	}
 }
 
@@ -279,6 +404,18 @@ func runStreamPluginAndWaitForAnswer(
 	t *testing.T,
 	model *streamTestChatModel,
 ) string {
+	return runStreamPluginAndWaitForAnswerWithService(
+		t,
+		&streamTestModelService{chatModel: model},
+		nil,
+	)
+}
+
+func runStreamPluginAndWaitForAnswerWithService(
+	t *testing.T,
+	service *streamTestModelService,
+	configure func(*types.ChatManage),
+) string {
 	t.Helper()
 
 	bus := event.NewEventBus()
@@ -306,9 +443,12 @@ func runStreamPluginAndWaitForAnswer(
 	})
 
 	plugin := &PluginChatCompletionStream{
-		modelService: &streamTestModelService{chatModel: model},
+		modelService: service,
 	}
 	cm := testChatManage(bus.AsEventBusInterface())
+	if configure != nil {
+		configure(cm)
+	}
 
 	if err := plugin.OnEvent(context.Background(), types.CHAT_COMPLETION_STREAM, cm, func() *PluginError {
 		return nil
@@ -325,6 +465,13 @@ func runStreamPluginAndWaitForAnswer(
 		t.Fatal("timed out waiting for final answer event")
 	}
 	return ""
+}
+
+func assertChatCalls(t *testing.T, model *streamTestChatModel, want int) {
+	t.Helper()
+	if model.chatCalls != want {
+		t.Fatalf("Chat calls = %d, want %d", model.chatCalls, want)
+	}
 }
 
 func disableChatRetrySleep(t *testing.T) {

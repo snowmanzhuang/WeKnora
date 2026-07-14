@@ -37,9 +37,21 @@ func pipelineError(ctx context.Context, stage, action string, fields map[string]
 func prepareChatModel(ctx context.Context, modelService interfaces.ModelService,
 	chatManage *types.ChatManage,
 ) (chat.Chat, *chat.ChatOptions, error) {
-	chatModel, err := modelService.GetChatModel(ctx, chatManage.ChatModelID)
+	return prepareChatModelByID(ctx, modelService, chatManage.ChatModelID, chatManage)
+}
+
+func prepareFallbackChatModel(ctx context.Context, modelService interfaces.ModelService,
+	chatManage *types.ChatManage,
+) (chat.Chat, *chat.ChatOptions, error) {
+	return prepareChatModelByID(ctx, modelService, chatManage.FallbackModelID, chatManage)
+}
+
+func prepareChatModelByID(ctx context.Context, modelService interfaces.ModelService,
+	modelID string, chatManage *types.ChatManage,
+) (chat.Chat, *chat.ChatOptions, error) {
+	chatModel, err := modelService.GetChatModel(ctx, modelID)
 	if err != nil {
-		logger.Errorf(ctx, "Failed to get chat model: %v", err)
+		logger.Errorf(ctx, "Failed to get chat model %s: %v", modelID, err)
 		return nil, nil, err
 	}
 
@@ -85,6 +97,10 @@ func warnIfAnswerMissingKBCitations(ctx context.Context, stage string, chatManag
 // When SystemPromptOverride is set (e.g. by intent-specific prompt logic),
 // it takes precedence over the default SummaryConfig.Prompt.
 func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
+	return prepareMessagesWithHistoryForVision(chatManage, chatManage.ChatModelSupportsVision)
+}
+
+func prepareMessagesWithHistoryForVision(chatManage *types.ChatManage, supportsVision bool) []chat.Message {
 	base := chatManage.SummaryConfig.Prompt
 	if chatManage.SystemPromptOverride != "" {
 		base = chatManage.SystemPromptOverride
@@ -103,8 +119,12 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 
 	// Add current user message. Only include images when the chat model supports
 	// vision; non-vision models rely on the text description in UserContent.
-	userMsg := chat.Message{Role: "user", Content: chatManage.UserContent}
-	if chatManage.ChatModelSupportsVision && len(chatManage.Images) > 0 {
+	userContent := chatManage.UserContent
+	if !supportsVision && chatManage.ImageDescription != "" && !strings.Contains(userContent, chatManage.ImageDescription) {
+		userContent += "\n\n[用户上传图片内容]\n" + chatManage.ImageDescription
+	}
+	userMsg := chat.Message{Role: "user", Content: userContent}
+	if supportsVision && len(chatManage.Images) > 0 {
 		userMsg.Images = chatManage.Images
 	}
 	chatMessages = append(chatMessages, userMsg)

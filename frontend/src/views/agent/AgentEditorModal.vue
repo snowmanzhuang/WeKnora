@@ -583,6 +583,24 @@
                       </div>
                     </div>
 
+                    <!-- 备用模型选择 -->
+                    <div class="setting-row">
+                      <div class="setting-info">
+                        <label>{{ $t('agent.editor.fallbackModel') }}</label>
+                        <p class="desc">{{ $t('agent.editor.fallbackModelDesc') }}</p>
+                      </div>
+                      <div class="setting-control">
+                        <ModelSelector model-type="KnowledgeQA"
+                          :selected-model-id="formData.config.fallback_model_id"
+                          :all-models="allModels"
+                          :excluded-model-ids="formData.config.model_id ? [formData.config.model_id] : []"
+                          clearable
+                          @update:selected-model-id="(val: string) => formData.config.fallback_model_id = val"
+                          @add-model="handleAddModel('llm')"
+                          :placeholder="$t('agent.editor.fallbackModelPlaceholder')" />
+                      </div>
+                    </div>
+
                     <!-- 温度 -->
                     <div class="setting-row">
                       <div class="setting-info">
@@ -1990,6 +2008,7 @@ const defaultFormData = {
     context_template: '',
     // 模型设置
     model_id: '',
+    fallback_model_id: '',
     rerank_model_id: '',
     temperature: 0.7,
     max_completion_tokens: 2048,
@@ -2056,6 +2075,12 @@ const defaultFormData = {
 };
 
 const formData = ref(JSON.parse(JSON.stringify(defaultFormData)));
+
+watch(() => formData.value.config.model_id, (primaryModelID) => {
+  if (primaryModelID && formData.value.config.fallback_model_id === primaryModelID) {
+    formData.value.config.fallback_model_id = '';
+  }
+});
 
 const applyDefaultChatModelIfEmpty = () => {
   if (props.mode !== 'create' || !formData.value) return
@@ -3876,6 +3901,12 @@ const handleSave = async () => {
 
   if (!formData.value.config.model_id) {
     MessagePlugin.error(t('agent.editor.modelRequired'));
+    currentSection.value = 'model';
+    return;
+  }
+
+  if (formData.value.config.fallback_model_id === formData.value.config.model_id) {
+    MessagePlugin.error(t('agent.editor.fallbackModelSameAsPrimary'));
     currentSection.value = 'model';
     return;
   }

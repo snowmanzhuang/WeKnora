@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -19,10 +20,12 @@ import (
 
 type mockResponse struct {
 	chunks []types.StreamResponse
+	err    error
 }
 
 type mockChat struct {
 	mu        sync.Mutex
+	id        string
 	responses []mockResponse
 	callCount int
 }
@@ -35,6 +38,9 @@ func (m *mockChat) ChatStream(_ context.Context, _ []chat.Message, _ *chat.ChatO
 	}
 	resp := m.responses[m.callCount]
 	m.callCount++
+	if resp.err != nil {
+		return nil, resp.err
+	}
 
 	ch := make(chan types.StreamResponse, len(resp.chunks))
 	for _, chunk := range resp.chunks {
@@ -48,8 +54,13 @@ func (m *mockChat) Chat(_ context.Context, _ []chat.Message, _ *chat.ChatOptions
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (m *mockChat) GetModelName() string { return "mock-model" }
-func (m *mockChat) GetModelID() string   { return "mock-id" }
+func (m *mockChat) GetModelName() string { return m.GetModelID() }
+func (m *mockChat) GetModelID() string {
+	if m.id != "" {
+		return m.id
+	}
+	return "mock-id"
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -217,6 +228,34 @@ func TestStreamThinkingToEventBus_PropagatesFinishReason(t *testing.T) {
 			assert.Equal(t, tt.wantReason, resp.FinishReason)
 		})
 	}
+}
+
+func TestCallLLMWithRetry_ActivatesFallbackModel(t *testing.T) {
+	primary := &mockChat{
+		id: "primary-model",
+		responses: []mockResponse{{
+			err: errors.New("API request failed with status 401: invalid API key"),
+		}},
+	}
+	fallback := &mockChat{
+		id: "fallback-model",
+		responses: []mockResponse{{chunks: []types.StreamResponse{
+			{ResponseType: types.ResponseTypeAnswer, Content: "fallback answer", Done: true, FinishReason: "stop"},
+		}}},
+	}
+	engine := newTestEngine(t, primary)
+	engine.SetFallbackChatModel(fallback)
+
+	response, err := engine.callLLMWithRetry(
+		context.Background(), emptyMessages(), emptyTools(), &types.AgentState{},
+		"test query", 0, "sess-1",
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, "fallback answer", response.Content)
+	assert.Equal(t, 1, primary.callCount)
+	assert.Equal(t, 1, fallback.callCount)
 }
 
 // TestStreamThinkingToEventBus_RoutesReasoningAndAnswerSeparately is the
@@ -390,4 +429,29 @@ func TestStreamFinalAnswerToEventBus_EmitsDoneWhenProviderEndsWithEmptyChunk(t *
 	assert.Empty(t, finalAnswerEvents[1].Content)
 	assert.True(t, finalAnswerEvents[1].Done)
 	assert.Equal(t, "final answer", state.FinalAnswer)
+}
+
+func TestStreamFinalAnswerToEventBus_ActivatesFallbackModel(t *testing.T) {
+	primary := &mockChat{
+		id: "primary-model",
+		responses: []mockResponse{{
+			err: errors.New("API request failed with status 401: invalid API key"),
+		}},
+	}
+	fallback := &mockChat{
+		id: "fallback-model",
+		responses: []mockResponse{{chunks: []types.StreamResponse{
+			{ResponseType: types.ResponseTypeAnswer, Content: "fallback final answer", Done: true, FinishReason: "stop"},
+		}}},
+	}
+	engine := newTestEngine(t, primary)
+	engine.SetFallbackChatModel(fallback)
+	state := &types.AgentState{}
+
+	err := engine.streamFinalAnswerToEventBus(context.Background(), "test query", state, "sess-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, "fallback final answer", state.FinalAnswer)
+	assert.Equal(t, 1, primary.callCount)
+	assert.Equal(t, 1, fallback.callCount)
 }

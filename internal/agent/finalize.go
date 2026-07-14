@@ -80,32 +80,55 @@ Now generate the final answer:`, query)
 	logger.Debugf(ctx, "[Agent][FinalAnswer] AnswerID: %s", answerID)
 	answerDoneEmitted := false
 
-	llmResult, err := e.streamLLMToEventBus(
-		ctx,
-		messages,
-		&chat.ChatOptions{Temperature: e.config.Temperature}, // Thinking disabled for final answer synthesis
-		func(chunk *types.StreamResponse, fullContent string) {
-			// Defensive filter: only emit answer content, skip thinking chunks
-			if chunk.ResponseType == types.ResponseTypeThinking {
-				return
-			}
-			if chunk.Content != "" {
-				logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(chunk.Content))
-				e.eventBus.Emit(ctx, event.Event{
-					ID:        answerID,
-					Type:      event.EventAgentFinalAnswer,
-					SessionID: sessionID,
-					Data: event.AgentFinalAnswerData{
-						Content: chunk.Content,
-						Done:    chunk.Done,
-					},
-				})
-				if chunk.Done {
-					answerDoneEmitted = true
+	streamFinalAnswer := func() (*streamLLMResult, error) {
+		return e.streamLLMToEventBus(
+			ctx,
+			messages,
+			&chat.ChatOptions{Temperature: e.config.Temperature}, // Thinking disabled for final answer synthesis
+			func(chunk *types.StreamResponse, fullContent string) {
+				// Defensive filter: only emit answer content, skip thinking chunks
+				if chunk.ResponseType == types.ResponseTypeThinking {
+					return
+				}
+				if chunk.Content != "" {
+					logger.Debugf(ctx, "[Agent][FinalAnswer] Emitting answer chunk: %d chars", len(chunk.Content))
+					e.eventBus.Emit(ctx, event.Event{
+						ID:        answerID,
+						Type:      event.EventAgentFinalAnswer,
+						SessionID: sessionID,
+						Data: event.AgentFinalAnswerData{
+							Content: chunk.Content,
+							Done:    chunk.Done,
+						},
+					})
+					if chunk.Done {
+						answerDoneEmitted = true
+					}
+				}
+			},
+		)
+	}
+	streamWithRetry := func(modelRole string) (*streamLLMResult, error) {
+		llmResult, err := streamFinalAnswer()
+		if err != nil && isTransientError(err) {
+			for retry := 1; retry <= maxLLMRetries; retry++ {
+				retryDelay := time.Duration(retry) * time.Second
+				logger.Warnf(ctx, "[Agent][FinalAnswer] %s LLM transient error (attempt %d/%d), retrying in %v: %v",
+					modelRole, retry, maxLLMRetries, retryDelay, err)
+				time.Sleep(retryDelay)
+				llmResult, err = streamFinalAnswer()
+				if err == nil || !isTransientError(err) {
+					break
 				}
 			}
-		},
-	)
+		}
+		return llmResult, err
+	}
+
+	llmResult, err := streamWithRetry("primary")
+	if err != nil && e.activateFallbackChatModel(ctx, err) {
+		llmResult, err = streamWithRetry("fallback")
+	}
 	if err != nil {
 		logger.Errorf(ctx, "[Agent][FinalAnswer] Final answer generation failed: %v", err)
 		common.PipelineError(ctx, "Agent", "final_answer_stream_failed", map[string]interface{}{

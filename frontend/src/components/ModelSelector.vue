@@ -7,6 +7,7 @@
       :disabled="disabled"
       :loading="loading"
       :status="status"
+      :clearable="clearable"
       filterable
       style="width: 100%;"
     >
@@ -53,6 +54,8 @@ interface Props {
   disabled?: boolean
   placeholder?: string
   status?: 'default' | 'success' | 'warning' | 'error'
+  clearable?: boolean
+  excludedModelIds?: string[]
   // 可选：外部传入的所有模型列表，如果提供则不调用API
   allModels?: ModelConfig[]
 }
@@ -61,6 +64,8 @@ const props = withDefaults(defineProps<Props>(), {
   disabled: false,
   placeholder: '',
   status: 'default',
+  clearable: false,
+  excludedModelIds: () => [],
 })
 
 const emit = defineEmits<{
@@ -68,9 +73,14 @@ const emit = defineEmits<{
   'add-model': []
 }>()
 
-const models = ref<ModelConfig[]>([])
+const allAvailableModels = ref<ModelConfig[]>([])
 const loading = ref(false)
 const { t } = useI18n()
+
+const models = computed(() => allAvailableModels.value.filter(model =>
+  model.type === props.modelType
+  && !props.excludedModelIds.includes(model.id || ''),
+))
 
 const placeholderText = computed(() => {
   return props.placeholder || t('model.selectModelPlaceholder')
@@ -81,17 +91,12 @@ const modelDisplayName = (model: ModelConfig) => {
   return displayName || model.name
 }
 
-// 监听 allModels 变化，自动过滤当前类型的模型
+// 监听 allModels 变化；类型和排除列表由 models 的 computed 统一处理。
 watch(() => props.allModels, (newModels) => {
   if (newModels && Array.isArray(newModels)) {
-    models.value = newModels.filter(m => m.type === props.modelType)
+    allAvailableModels.value = newModels
   }
 }, { immediate: true })
-
-const selectedModel = computed(() => {
-  if (!props.selectedModelId) return null
-  return models.value.find(m => m.id === props.selectedModelId)
-})
 
 // 加载模型列表（仅在未提供 allModels 时调用）
 const loadModels = async () => {
@@ -103,29 +108,28 @@ const loadModels = async () => {
   loading.value = true
   try {
     const result = await listModels()
-    // 前端按类型筛选模型
     if (result && Array.isArray(result)) {
-      models.value = result.filter(m => m.type === props.modelType)
+      allAvailableModels.value = result
     } else {
-      models.value = []
+      allAvailableModels.value = []
     }
   } catch (error) {
     console.error(t('model.loadFailed'), error)
     MessagePlugin.error(t('model.loadFailed'))
-    models.value = []
+    allAvailableModels.value = []
   } finally {
     loading.value = false
   }
 }
 
 // 处理模型选择变化
-const handleModelChange = (value: string) => {
+const handleModelChange = (value: string | number | undefined | null) => {
   // 如果选择的是添加模型选项，触发添加事件而不更新选中值
   if (value === '__add_model__') {
     emit('add-model')
     return
   }
-  emit('update:selectedModelId', value)
+  emit('update:selectedModelId', value == null ? '' : String(value))
 }
 
 // 暴露刷新方法给父组件

@@ -82,11 +82,23 @@ func (s *sessionService) AgentQA(
 		logger.Warnf(ctx, "No summary model configured for custom agent %s", req.CustomAgent.ID)
 		return errors.New("summary model (model_id) is not configured in custom agent settings")
 	}
+	fallbackModelID, _ := s.resolveFallbackChatModel(ctx, req.CustomAgent, effectiveModelID)
+	agentConfig.FallbackModelID = fallbackModelID
 
 	summaryModel, err := s.modelService.GetChatModel(ctx, effectiveModelID)
 	if err != nil {
-		logger.Warnf(ctx, "Failed to get chat model: %v", err)
-		return fmt.Errorf("failed to get chat model: %w", err)
+		if fallbackModelID == "" {
+			logger.Warnf(ctx, "Failed to get chat model: %v", err)
+			return fmt.Errorf("failed to get chat model: %w", err)
+		}
+		logger.Warnf(ctx, "Failed to initialize primary chat model %s, activating fallback %s: %v",
+			effectiveModelID, fallbackModelID, err)
+		summaryModel, err = s.modelService.GetChatModel(ctx, fallbackModelID)
+		if err != nil {
+			return fmt.Errorf("failed to get primary and fallback chat models: %w", err)
+		}
+		effectiveModelID = fallbackModelID
+		agentConfig.FallbackModelID = ""
 	}
 
 	// Get rerank model from custom agent config only when knowledge_search can
@@ -232,6 +244,7 @@ func (s *sessionService) buildAgentConfig(
 		RetrieveKBOnlyWhenMentioned: customAgent.Config.RetrieveKBOnlyWhenMentioned,
 		LLMCallTimeout:              customAgent.Config.LLMCallTimeout,
 		RetainRetrievalHistory:      customAgent.Config.RetainRetrievalHistory,
+		FallbackModelID:             customAgent.Config.FallbackModelID,
 	}
 
 	// Falls back to global configuration if no specific timeout is set for the agent.

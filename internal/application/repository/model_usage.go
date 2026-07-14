@@ -32,18 +32,19 @@ func scopeKnowledgeBasesByModelID(db *gorm.DB, modelID string) *gorm.DB {
 func scopeCustomAgentsByModelID(db *gorm.DB, modelID string) *gorm.DB {
 	if db.Dialector.Name() == "postgres" {
 		return db.Where(
-			"config->>'model_id' = ? OR config->>'rerank_model_id' = ? OR "+
+			"config->>'model_id' = ? OR config->>'fallback_model_id' = ? OR config->>'rerank_model_id' = ? OR "+
 				"config->>'vlm_model_id' = ? OR config->>'asr_model_id' = ? OR "+
 				"config->>'query_understand_model_id' = ?",
-			modelID, modelID, modelID, modelID, modelID,
+			modelID, modelID, modelID, modelID, modelID, modelID,
 		)
 	}
 	return db.Where(
 		"json_extract(config, '$.model_id') = ? OR "+
+			"json_extract(config, '$.fallback_model_id') = ? OR "+
 			"json_extract(config, '$.rerank_model_id') = ? OR "+
 			"json_extract(config, '$.vlm_model_id') = ? OR "+
 			"json_extract(config, '$.asr_model_id') = ? OR "+
 			"json_extract(config, '$.query_understand_model_id') = ?",
-		modelID, modelID, modelID, modelID, modelID,
+		modelID, modelID, modelID, modelID, modelID, modelID,
 	)
 }

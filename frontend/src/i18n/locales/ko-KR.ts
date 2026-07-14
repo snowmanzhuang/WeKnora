@@ -2087,6 +2087,10 @@ export default {
       agentDesc: "복잡한 문제에 대한 다단계 사고와 심층 분석",
       model: "모델",
       modelPlaceholder: "모델을 선택하세요.",
+      fallbackModel: "대체 모델",
+      fallbackModelDesc: "기본 모델을 사용할 수 없고 아직 답변이 출력되지 않았을 때 자동으로 전환합니다. API 자격 증명은 모델 설정에서 관리하세요.",
+      fallbackModelPlaceholder: "선택 사항: 대체 모델 선택",
+      fallbackModelSameAsPrimary: "대체 모델은 기본 모델과 달라야 합니다.",
       systemPrompt: "시스템 프롬프트",
       systemPromptPlaceholder:
         "에이전트의 동작과 역할을 정의하는 사용자 지정 시스템 프롬프트(웹 검색 동작을 동적으로 제어하려면 {'{{'}web_search_status{'}}'} 플레이스홀더 사용)",

@@ -188,6 +188,15 @@ func (s *agentService) CreateAgentEngine(
 		kbInfos, selectedDocs, sessionID,
 		systemPromptTemplate,
 	)
+	if config.FallbackModelID != "" {
+		fallbackModel, fallbackErr := s.modelService.GetChatModel(ctx, config.FallbackModelID)
+		if fallbackErr != nil {
+			logger.Warnf(ctx, "Failed to initialize fallback chat model %s: %v", config.FallbackModelID, fallbackErr)
+		} else {
+			engine.SetFallbackChatModel(fallbackModel)
+			logger.Infof(ctx, "Fallback chat model configured: %s", config.FallbackModelID)
+		}
+	}
 	engine.SetAppConfig(s.cfg)
 	pinnedMCP := s.resolvePinnedMCPServiceInfos(ctx, config)
 	s.attachPinnedMCPToolNames(toolRegistry, pinnedMCP)

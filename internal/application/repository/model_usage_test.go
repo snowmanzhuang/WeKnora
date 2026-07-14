@@ -102,11 +102,30 @@ func TestCountByModelID_CustomAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), count)
 
+	agent3 := &types.CustomAgent{
+		ID:       uuid.New().String(),
+		Name:     "fallback-agent",
+		TenantID: 1,
+		Config: types.CustomAgentConfig{
+			FallbackModelID: modelID,
+		},
+	}
+	require.NoError(t, repo.CreateAgent(ctx, agent3))
+
+	count, err = repo.CountByModelID(ctx, 1, modelID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+
 	count, err = repo.CountByModelID(ctx, 2, modelID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
 
 	require.NoError(t, repo.DeleteAgent(ctx, agent2.ID, 1))
+	count, err = repo.CountByModelID(ctx, 1, modelID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), count)
+
+	require.NoError(t, repo.DeleteAgent(ctx, agent3.ID, 1))
 	count, err = repo.CountByModelID(ctx, 1, modelID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), count)

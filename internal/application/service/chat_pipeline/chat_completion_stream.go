@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/event"
+	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
@@ -48,14 +49,29 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	})
 
 	// Prepare chat model and options
+	usingFallback := false
 	chatModel, opt, err := prepareChatModel(ctx, p.modelService, chatManage)
 	if err != nil {
-		return ErrGetChatModel.WithError(err)
+		primaryErr := err
+		if chatManage.FallbackModelID == "" || !chat.ShouldFailover(ctx, err) {
+			return ErrGetChatModel.WithError(err)
+		}
+		chatModel, opt, err = prepareFallbackChatModel(ctx, p.modelService, chatManage)
+		if err != nil {
+			return ErrGetChatModel.WithError(err)
+		}
+		usingFallback = true
+		logStreamFallbackActivation(ctx, chatManage, primaryErr)
 	}
 
 	// Prepare base messages without history
 
+	activeModelID := chatManage.ChatModelID
 	chatMessages := prepareMessagesWithHistory(chatManage)
+	if usingFallback {
+		activeModelID = chatManage.FallbackModelID
+		chatMessages = prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+	}
 	pipelineInfo(ctx, "Stream", "messages_ready", map[string]interface{}{
 		"message_count": len(chatMessages),
 		"system_prompt": chatMessages[0].Content,
@@ -80,21 +96,31 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	pipelineInfo(ctx, "Stream", "model_call", map[string]interface{}{
 		"chat_model": chatManage.ChatModelID,
 	})
-	var responseChan <-chan types.StreamResponse
-	streamAttempt := 1
-	for ; streamAttempt <= chatCompletionMaxAttempts; streamAttempt++ {
-		responseChan, err = chatModel.ChatStream(ctx, chatMessages, opt)
-		if err == nil || !isRetryableChatModelError(ctx, err) || streamAttempt == chatCompletionMaxAttempts {
-			break
-		}
-		pipelineWarn(ctx, "Stream", "model_call_retry", map[string]interface{}{
-			"chat_model": chatManage.ChatModelID,
-			"attempt":    streamAttempt,
-			"max":        chatCompletionMaxAttempts,
-			"error":      err.Error(),
-		})
-		if !sleepBeforeChatRetry(ctx, streamAttempt) {
-			break
+	responseChan, streamAttempt, err := startChatStreamWithRetry(
+		ctx, chatModel, activeModelID, chatMessages, opt,
+	)
+	if err != nil && !usingFallback && chatManage.FallbackModelID != "" && chat.ShouldFailover(ctx, err) {
+		fallbackModel, fallbackOpt, fallbackErr := prepareFallbackChatModel(ctx, p.modelService, chatManage)
+		if fallbackErr == nil {
+			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+			fallbackChan, fallbackAttempt, startErr := startChatStreamWithRetry(
+				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
+			)
+			if startErr == nil {
+				logStreamFallbackActivation(ctx, chatManage, err)
+				chatModel = fallbackModel
+				opt = fallbackOpt
+				chatMessages = fallbackMessages
+				activeModelID = chatManage.FallbackModelID
+				usingFallback = true
+				responseChan = fallbackChan
+				streamAttempt = fallbackAttempt
+				err = nil
+			} else {
+				err = startErr
+			}
+		} else {
+			err = fallbackErr
 		}
 	}
 	if err != nil {
@@ -129,6 +155,71 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		answerDone := false
 		terminalErrorEmitted := false
 		outputStarted := false
+
+		activateFallback := func(cause error) bool {
+			if usingFallback || outputStarted || chatManage.FallbackModelID == "" ||
+				!chat.ShouldFailover(ctx, cause) {
+				return false
+			}
+			fallbackModel, fallbackOpt, fallbackErr := prepareFallbackChatModel(ctx, p.modelService, chatManage)
+			if fallbackErr != nil {
+				pipelineError(ctx, "Stream", "fallback_model_init_failed", map[string]interface{}{
+					"fallback_model": chatManage.FallbackModelID,
+					"error":          fallbackErr.Error(),
+				})
+				return false
+			}
+			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+			fallbackChan, fallbackAttempt, fallbackErr := startChatStreamWithRetry(
+				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
+			)
+			if fallbackErr != nil || fallbackChan == nil {
+				if fallbackErr != nil {
+					pipelineError(ctx, "Stream", "fallback_model_call_failed", map[string]interface{}{
+						"fallback_model": chatManage.FallbackModelID,
+						"error":          fallbackErr.Error(),
+					})
+				}
+				return false
+			}
+			logStreamFallbackActivation(ctx, chatManage, cause)
+			chatModel = fallbackModel
+			opt = fallbackOpt
+			chatMessages = fallbackMessages
+			activeModelID = chatManage.FallbackModelID
+			usingFallback = true
+			responseChan = fallbackChan
+			streamAttempt = fallbackAttempt
+			return true
+		}
+
+		restartCurrentModel := func(cause error, retryCurrent bool) bool {
+			if retryCurrent {
+				for streamAttempt < chatCompletionMaxAttempts {
+					if !sleepBeforeChatRetry(ctx, streamAttempt) {
+						return false
+					}
+					streamAttempt++
+					nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
+					if restartErr == nil && nextChan != nil {
+						responseChan = nextChan
+						pipelineWarn(ctx, "Stream", "stream_retry", map[string]interface{}{
+							"chat_model": activeModelID,
+							"attempt":    streamAttempt,
+							"max":        chatCompletionMaxAttempts,
+						})
+						return true
+					}
+					if restartErr != nil {
+						cause = restartErr
+						if !isRetryableChatModelError(ctx, restartErr) {
+							break
+						}
+					}
+				}
+			}
+			return activateFallback(cause)
+		}
 
 		closeThinking := func() {
 			if !thinkingOpen {
@@ -190,27 +281,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 							"session_id": chatManage.SessionID,
 							"answer_len": answerBuilder.Len(),
 						})
-						if !outputStarted && streamAttempt < chatCompletionMaxAttempts {
-							if sleepBeforeChatRetry(ctx, streamAttempt) {
-								streamAttempt++
-								nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
-								if restartErr == nil && nextChan != nil {
-									responseChan = nextChan
-									pipelineWarn(ctx, "Stream", "channel_close_retry", map[string]interface{}{
-										"session_id": chatManage.SessionID,
-										"attempt":    streamAttempt,
-										"max":        chatCompletionMaxAttempts,
-									})
-									continue streamLoop
-								}
-								if restartErr != nil {
-									pipelineError(ctx, "Stream", "channel_close_retry_failed", map[string]interface{}{
-										"session_id": chatManage.SessionID,
-										"attempt":    streamAttempt,
-										"error":      restartErr.Error(),
-									})
-								}
-							}
+						if !outputStarted && restartCurrentModel(
+							errors.New("model stream closed before sending a done event"), true,
+						) {
+							continue streamLoop
 						}
 						emitTerminalError("chat_stream_closed", "model stream closed before sending a done event")
 					}
@@ -223,30 +297,10 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 						"error":      response.Content,
 					})
 					streamErr := errors.New(response.Content)
-					if !outputStarted && isRetryableChatModelError(ctx, streamErr) && streamAttempt < chatCompletionMaxAttempts {
-						if !sleepBeforeChatRetry(ctx, streamAttempt) {
-							emitTerminalError("chat_stream_error", response.Content)
-							return
-						}
-						streamAttempt++
-						nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
-						if restartErr == nil && nextChan != nil {
-							responseChan = nextChan
-							pipelineWarn(ctx, "Stream", "stream_error_retry", map[string]interface{}{
-								"session_id": chatManage.SessionID,
-								"attempt":    streamAttempt,
-								"max":        chatCompletionMaxAttempts,
-								"error":      response.Content,
-							})
-							continue streamLoop
-						}
-						if restartErr != nil {
-							pipelineError(ctx, "Stream", "stream_error_retry_failed", map[string]interface{}{
-								"session_id": chatManage.SessionID,
-								"attempt":    streamAttempt,
-								"error":      restartErr.Error(),
-							})
-						}
+					if !outputStarted && restartCurrentModel(
+						streamErr, isRetryableChatModelError(ctx, streamErr),
+					) {
+						continue streamLoop
 					}
 					emitTerminalError("chat_stream_error", response.Content)
 					return
@@ -305,6 +359,49 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	}()
 
 	return next()
+}
+
+func startChatStreamWithRetry(
+	ctx context.Context,
+	model chat.Chat,
+	modelID string,
+	messages []chat.Message,
+	opt *chat.ChatOptions,
+) (<-chan types.StreamResponse, int, error) {
+	var responseChan <-chan types.StreamResponse
+	var err error
+	attempt := 1
+	for ; attempt <= chatCompletionMaxAttempts; attempt++ {
+		responseChan, err = model.ChatStream(ctx, messages, opt)
+		if err == nil && responseChan == nil {
+			err = errors.New("chat stream returned nil channel")
+		}
+		if err == nil || !isRetryableChatModelError(ctx, err) || attempt == chatCompletionMaxAttempts {
+			break
+		}
+		pipelineWarn(ctx, "Stream", "model_call_retry", map[string]interface{}{
+			"chat_model": modelID,
+			"attempt":    attempt,
+			"max":        chatCompletionMaxAttempts,
+			"error":      err.Error(),
+		})
+		if !sleepBeforeChatRetry(ctx, attempt) {
+			break
+		}
+	}
+	return responseChan, attempt, err
+}
+
+func logStreamFallbackActivation(ctx context.Context, chatManage *types.ChatManage, cause error) {
+	detail := "primary model unavailable"
+	if cause != nil {
+		detail = cause.Error()
+	}
+	pipelineWarn(ctx, "Stream", "fallback_model_activate", map[string]interface{}{
+		"primary_model":  chatManage.ChatModelID,
+		"fallback_model": chatManage.FallbackModelID,
+		"error":          detail,
+	})
 }
 
 func streamErrorUserMessage(language string, hasPartialAnswer bool) string {

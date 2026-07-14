@@ -20,6 +20,7 @@ export interface CustomAgentConfig {
 
   // ===== 模型设置 =====
   model_id?: string;
+  fallback_model_id?: string;        // 可选的备用对话模型 ID
   rerank_model_id?: string;         // ReRank 模型 ID
   temperature?: number;
   max_completion_tokens?: number;   // 最大生成token数（普通模式）

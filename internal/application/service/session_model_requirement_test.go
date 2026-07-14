@@ -147,3 +147,47 @@ func TestResolveChatModelIDUsesValidSummaryModelOverride(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "override-chat", modelID)
 }
+
+func TestResolveFallbackChatModelUsesValidDifferentChatModel(t *testing.T) {
+	svc := &sessionService{
+		modelService: &stubModelService{modelsByID: map[string]*types.Model{
+			"fallback-chat": {
+				ID:   "fallback-chat",
+				Type: types.ModelTypeKnowledgeQA,
+				Parameters: types.ModelParameters{
+					SupportsVision: true,
+				},
+			},
+		}},
+	}
+	agent := &types.CustomAgent{Config: types.CustomAgentConfig{FallbackModelID: "fallback-chat"}}
+
+	modelID, supportsVision := svc.resolveFallbackChatModel(context.Background(), agent, "primary-chat")
+
+	assert.Equal(t, "fallback-chat", modelID)
+	assert.True(t, supportsVision)
+}
+
+func TestResolveFallbackChatModelRejectsSameOrNonChatModel(t *testing.T) {
+	svc := &sessionService{
+		modelService: &stubModelService{modelsByID: map[string]*types.Model{
+			"rerank-only": {ID: "rerank-only", Type: types.ModelTypeRerank},
+		}},
+	}
+
+	modelID, supportsVision := svc.resolveFallbackChatModel(
+		context.Background(),
+		&types.CustomAgent{Config: types.CustomAgentConfig{FallbackModelID: "primary-chat"}},
+		"primary-chat",
+	)
+	assert.Empty(t, modelID)
+	assert.False(t, supportsVision)
+
+	modelID, supportsVision = svc.resolveFallbackChatModel(
+		context.Background(),
+		&types.CustomAgent{Config: types.CustomAgentConfig{FallbackModelID: "rerank-only"}},
+		"primary-chat",
+	)
+	assert.Empty(t, modelID)
+	assert.False(t, supportsVision)
+}
