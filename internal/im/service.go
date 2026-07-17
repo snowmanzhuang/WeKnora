@@ -961,7 +961,7 @@ func (s *Service) startChannelInternal(channel *IMChannel, factory AdapterFactor
 	if (channel.Mode == "websocket" || channel.Mode == "longpoll") && s.redis != nil {
 		leaderCtx, lCancel := context.WithCancel(context.Background())
 		leaderCancel = lCancel
-		go s.wsLeaderRenewLoop(leaderCtx, channel.ID)
+		go s.wsLeaderRenewLoop(leaderCtx, channel)
 	}
 
 	s.mu.Lock()
@@ -1051,10 +1051,12 @@ func (s *Service) releaseWSLeader(channelID string) {
 
 // wsLeaderRenewLoop periodically refreshes the leader lock TTL.
 // Stops when ctx is cancelled (channel stopped) or if the lock is lost.
-func (s *Service) wsLeaderRenewLoop(ctx context.Context, channelID string) {
+func (s *Service) wsLeaderRenewLoop(ctx context.Context, channel *IMChannel) {
+	channelID := channel.ID
 	key := RedisKeyLeader + channelID
 	ticker := time.NewTicker(wsLeaderRenewInterval)
 	defer ticker.Stop()
+	lastRenewedAt := time.Now()
 
 	for {
 		select {
@@ -1068,12 +1070,30 @@ func (s *Service) wsLeaderRenewLoop(ctx context.Context, channelID string) {
 				return 0
 			`)
 			result, err := script.Run(ctx, s.redis, []string{key}, s.instanceID, wsLeaderTTL.Milliseconds()).Int64()
-			if err != nil || result == 0 {
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				elapsed := time.Since(lastRenewedAt)
+				if !shouldRelinquishWSLeadership(err, 0, elapsed) {
+					logger.Warnf(context.Background(),
+						"[IM] Redis leader renewal failed for channel %s: %v (keeping adapter; will retry)",
+						channelID, err)
+					continue
+				}
 				logger.Warnf(context.Background(),
-					"[IM] Lost leadership for channel %s, stopping adapter", channelID)
-				s.StopChannel(channelID)
+					"[IM] Redis leader renewal remained unavailable for channel %s: %v; stopping adapter and retrying leadership",
+					channelID, err)
+				s.requeueChannelAfterLeadershipLoss(channel)
 				return
 			}
+			if shouldRelinquishWSLeadership(nil, result, time.Since(lastRenewedAt)) {
+				logger.Warnf(context.Background(),
+					"[IM] Lost leadership for channel %s, stopping adapter and retrying leadership", channelID)
+				s.requeueChannelAfterLeadershipLoss(channel)
+				return
+			}
+			lastRenewedAt = time.Now()
 			// Still the leader — verify the channel is still active. A
 			// delete/disable is served by whichever instance got the HTTP
 			// request; without this check the leader would keep the long
@@ -1103,6 +1123,38 @@ func (s *Service) wsLeaderRenewLoop(ctx context.Context, channelID string) {
 			return
 		}
 	}
+}
+
+// shouldRelinquishWSLeadership distinguishes a transient Redis error from a
+// confirmed or prolonged loss of the channel leader lease. One failed renewal
+// is tolerated while the existing lease still has a safe amount of TTL left.
+func shouldRelinquishWSLeadership(err error, result int64, sinceLastRenewal time.Duration) bool {
+	if err == nil {
+		return result == 0
+	}
+	return sinceLastRenewal >= wsLeaderTTL-wsLeaderRenewInterval
+}
+
+// requeueChannelAfterLeadershipLoss atomically stops the matching runtime
+// channel and starts the existing leadership retry loop. Comparing the channel
+// pointer prevents an old renewal goroutine from stopping a newer replacement.
+func (s *Service) requeueChannelAfterLeadershipLoss(channel *IMChannel) bool {
+	if channel == nil {
+		return false
+	}
+
+	s.mu.Lock()
+	state, ok := s.channels[channel.ID]
+	if !ok || state.Channel != channel {
+		s.mu.Unlock()
+		return false
+	}
+	channelSnapshot := *channel
+	s.stopChannelLocked(channel.ID, state)
+	s.mu.Unlock()
+
+	go s.wsLeaderRetryLoop(&channelSnapshot)
+	return true
 }
 
 // wsLeaderRetryLoop periodically tries to acquire the WebSocket leader lock.
