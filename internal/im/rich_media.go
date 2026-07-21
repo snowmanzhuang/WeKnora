@@ -48,6 +48,7 @@ type imDisplayPreparer struct {
 	service        *Service
 	tenant         *types.Tenant
 	separateImages bool
+	resolver       *imFileServiceResolver
 	inlineImages   *imInlineImageRewriter
 }
 
@@ -57,16 +58,18 @@ func newIMDisplayPreparer(
 	incoming *IncomingMessage,
 	tenant *types.Tenant,
 ) *imDisplayPreparer {
+	resolver := newIMFileServiceResolver(tenant, service.defaultFileSvc, service.storageResolver)
 	preparer := &imDisplayPreparer{
 		service:        service,
 		tenant:         tenant,
 		separateImages: adapterSupportsImages(adapter),
+		resolver:       resolver,
 	}
 	if uploader, ok := adapter.(InlineImageUploader); ok {
 		preparer.inlineImages = &imInlineImageRewriter{
 			uploader: uploader,
 			incoming: incoming,
-			resolver: newIMFileServiceResolver(tenant, service.defaultFileSvc),
+			resolver: resolver,
 			refs:     make(map[string]string),
 			failures: make(map[string]time.Time),
 			tracked:  make(map[string]struct{}),
@@ -81,19 +84,22 @@ func (p *imDisplayPreparer) prepare(
 	display string,
 	final bool,
 ) (string, []*OutboundImage) {
+	// Reuse one resolver throughout a streaming reply so backend clients and
+	// platform image references remain cached, while still resolving with the
+	// request context of the current update.
+	p.resolver.ctx = ctx
 	content := stripImageXMLTags(display)
 
 	var images []*OutboundImage
 	if final && p.separateImages {
-		content, images = p.service.extractIMOutboundImages(ctx, content, p.tenant)
+		content, images = extractIMOutboundImages(ctx, content, p.resolver)
 	}
 
 	content = stripIMCitationTags(content)
 	if p.inlineImages != nil {
 		content = p.inlineImages.rewrite(ctx, content, final)
 	}
-	resolver := newIMFileServiceResolver(p.tenant, p.service.defaultFileSvc)
-	content = rewriteStorageURLs(ctx, content, resolver)
+	content = rewriteStorageURLs(ctx, content, p.resolver)
 	return content, images
 }
 
@@ -107,6 +113,7 @@ func (s *Service) prepareIMDisplayContent(
 		service:        s,
 		tenant:         tenant,
 		separateImages: includeImages,
+		resolver:       newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver),
 	}
 	return preparer.prepare(ctx, display, true)
 }
@@ -120,7 +127,7 @@ func (r *imInlineImageRewriter) rewrite(ctx context.Context, content string, fin
 	pending := make(map[string]imMarkdownImageSpan)
 	now := time.Now()
 	for _, span := range spans {
-		if types.ParseProviderScheme(span.Path) == "" {
+		if !isIMStoragePath(span.Path) {
 			continue
 		}
 		if _, ok := r.refs[span.Path]; ok {
@@ -148,7 +155,7 @@ func (r *imInlineImageRewriter) rewrite(ctx context.Context, content string, fin
 	}
 
 	return replaceIMMarkdownImageSpans(content, spans, func(span imMarkdownImageSpan) (string, bool) {
-		if types.ParseProviderScheme(span.Path) == "" {
+		if !isIMStoragePath(span.Path) {
 			return "", false
 		}
 		if ref := r.refs[span.Path]; ref != "" {
@@ -257,18 +264,27 @@ func (s *Service) extractIMOutboundImages(
 	content string,
 	tenant *types.Tenant,
 ) (string, []*OutboundImage) {
+	resolver := newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver)
+	resolver.ctx = ctx
+	return extractIMOutboundImages(ctx, content, resolver)
+}
+
+func extractIMOutboundImages(
+	ctx context.Context,
+	content string,
+	resolver *imFileServiceResolver,
+) (string, []*OutboundImage) {
 	spans := scanIMMarkdownImages(content)
 	if len(spans) == 0 {
 		return content, nil
 	}
 
-	resolver := newIMFileServiceResolver(tenant, s.defaultFileSvc)
 	images := make([]*OutboundImage, 0, min(len(spans), maxIMOutboundImages))
 	remove := make([]imMarkdownImageSpan, 0, len(spans))
 	uploaded := make(map[string]bool)
 
 	for _, span := range spans {
-		if types.ParseProviderScheme(span.Path) == "" {
+		if !isIMStoragePath(span.Path) {
 			continue
 		}
 		if uploaded[span.Path] {
@@ -324,6 +340,14 @@ func (s *Service) extractIMOutboundImages(
 	}
 
 	return removeIMMarkdownImageSpans(content, remove), images
+}
+
+func isIMStoragePath(path string) bool {
+	if types.ParseProviderScheme(path) != "" {
+		return true
+	}
+	_, ok := types.ParseResourcePath(path)
+	return ok
 }
 
 func sendIMOutboundImages(ctx context.Context, adapter Adapter, msg *IncomingMessage, images []*OutboundImage) {

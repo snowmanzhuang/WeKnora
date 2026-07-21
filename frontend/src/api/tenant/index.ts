@@ -53,7 +53,7 @@ export interface APIPrincipalTestToken {
 //  - 'chat': run the conversation flow (sessions + agent listing + self identity)
 //  - 'read_agents': list/read agents without chat or authoring
 //  - 'ingest': write content into allowed knowledge bases (docs/chunks/FAQ/tags/wiki)
-//  - 'manage_kbs': manage existing knowledge-base metadata/configuration
+//  - 'manage_kbs': manage the KB lifecycle (create/copy/duplicate/update/delete + config)
 //  - 'manage_agents': create/update/delete/copy agents
 //  - 'message_history': search/read tenant chat-history metadata
 //  - 'manage_models': manage tenant model definitions, checks, and credentials
@@ -79,14 +79,23 @@ export type TenantAPIKeyCapability =
   | 'manage_datasources'
   | 'manage_channels'
   | 'manage_vector_stores'
+  | 'manage_storage_backends'
   | 'manage_web_search'
   | 'run_evaluations'
   | 'manage_members'
   | 'manage_spaces'
   | 'manage_tenant_settings'
+  | 'system_tenants_read'
+  | 'system_tenants_manage'
+  | 'system_settings_read'
+  | 'system_settings_manage'
+  | 'system_runtime_read'
+  | 'system_runtime_manage'
+  | 'system_audit_read'
 
 export interface TenantAPIKey {
   id: number
+  scope_type?: 'tenant' | 'platform'
   name: string
   api_key: string
   full_access: boolean

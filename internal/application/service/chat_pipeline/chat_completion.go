@@ -61,44 +61,69 @@ func (p *PluginChatCompletion) OnEvent(
 		usingFallback = true
 	}
 
-	// Prepare messages including conversation history
-	pipelineInfo(ctx, "Completion", "messages_ready", map[string]interface{}{
-		"message_count": len(chatManage.History) + 2,
-	})
-	chatMessages := prepareMessagesWithHistory(chatManage)
 	activeModelID := chatManage.ChatModelID
+	activeSupportsVision := chatManage.ChatModelSupportsVision
 	if usingFallback {
 		activeModelID = chatManage.FallbackModelID
-		chatMessages = prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+		activeSupportsVision = chatManage.FallbackSupportsVision
 	}
+
+	// Prepare messages and request-local reference registries for the model
+	// that will actually receive this attempt.
+	chatMessages, sourceRefs, resourceRefs := prepareEncodedMessagesWithReferences(
+		ctx, chatManage, activeSupportsVision,
+	)
+	pipelineInfo(ctx, "Completion", "messages_ready", map[string]interface{}{
+		"message_count": len(chatMessages),
+	})
 
 	// Call the chat model to generate response
 	pipelineInfo(ctx, "Completion", "model_call", map[string]interface{}{
-		"chat_model": chatManage.ChatModelID,
+		"chat_model": activeModelID,
 	})
 	chatResponse, err := callChatModelWithRetry(ctx, chatModel, activeModelID, chatMessages, opt)
 	if err != nil && !usingFallback && chatManage.FallbackModelID != "" && chat.ShouldFailover(ctx, err) {
+		primaryErr := err
 		pipelineWarn(ctx, "Completion", "fallback_model_activate", map[string]interface{}{
 			"primary_model":  chatManage.ChatModelID,
 			"fallback_model": chatManage.FallbackModelID,
-			"error":          err.Error(),
+			"error":          primaryErr.Error(),
 		})
 		fallbackModel, fallbackOpt, fallbackErr := prepareFallbackChatModel(ctx, p.modelService, chatManage)
 		if fallbackErr == nil {
-			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
-			chatResponse, err = callChatModelWithRetry(
+			fallbackMessages, fallbackSourceRefs, fallbackResourceRefs := prepareEncodedMessagesWithReferences(
+				ctx, chatManage, chatManage.FallbackSupportsVision,
+			)
+			fallbackResponse, fallbackCallErr := callChatModelWithRetry(
 				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
 			)
+			if fallbackCallErr == nil {
+				chatResponse = fallbackResponse
+				sourceRefs = fallbackSourceRefs
+				resourceRefs = fallbackResourceRefs
+				activeModelID = chatManage.FallbackModelID
+				err = nil
+			} else {
+				err = fmt.Errorf("primary model failed (%v) and fallback model failed: %w", primaryErr, fallbackCallErr)
+			}
 		} else {
-			err = fmt.Errorf("primary model failed and fallback initialization failed: %v: %w", err, fallbackErr)
+			err = fmt.Errorf("primary model failed (%v) and fallback initialization failed: %w", primaryErr, fallbackErr)
 		}
 	}
 	if err != nil {
 		pipelineError(ctx, "Completion", "model_call", map[string]interface{}{
-			"chat_model": chatManage.ChatModelID,
+			"chat_model": activeModelID,
 			"error":      err.Error(),
 		})
 		return ErrModelCall.WithError(err)
+	}
+	resourceRefs.DecodeResponse(chatResponse)
+	sourceRefs.ExpandResponse(chatResponse)
+	if orphans := resourceRefs.OrphanAliases(chatResponse.Content); len(orphans) > 0 {
+		pipelineWarn(ctx, "Completion", "orphan_resource_aliases", map[string]interface{}{
+			"session_id": chatManage.SessionID,
+			"aliases":    orphans,
+		})
 	}
 
 	pipelineInfo(ctx, "Completion", "output", map[string]interface{}{
@@ -107,7 +132,9 @@ func (p *PluginChatCompletion) OnEvent(
 		"completion_tokens": chatResponse.Usage.CompletionTokens,
 		"prompt_tokens":     chatResponse.Usage.PromptTokens,
 	})
-	warnIfAnswerMissingKBCitations(ctx, "Completion", chatManage, chatResponse.Content)
+	if chatManage.CitationsEnabled() {
+		warnIfAnswerMissingKBCitations(ctx, "Completion", chatManage, chatResponse.Content)
+	}
 	chatManage.ChatResponse = chatResponse
 	return next()
 }

@@ -45,6 +45,7 @@ type SystemHandler struct {
 	tenantSvc        interfaces.TenantService
 	userSvc          interfaces.UserService
 	systemSettingSvc interfaces.SystemSettingService
+	apiKeySvc        interfaces.TenantAPIKeyService
 	// auditSvc is optional — when nil, emitAdminAudit no-ops so unit
 	// tests that wire a partial container still compile. In production
 	// the dig graph always provides one.
@@ -58,6 +59,11 @@ type SystemHandler struct {
 	// runtime task console. It updates business state and tracing before queue
 	// records are removed, unlike a raw Redis deletion.
 	knowledgeSvc runtimeKnowledgeCanceller
+	// storageBackendRepo lets GetStorageEngineStatus report multi-instance
+	// storage backends (Settings → Storage) as "available", not just the legacy
+	// singleton tenant.StorageEngineConfig. Optional — nil in partially-wired
+	// unit tests, in which case only the legacy config is consulted.
+	storageBackendRepo interfaces.StorageBackendRepository
 }
 
 // NewSystemHandler creates a new system handler
@@ -67,21 +73,161 @@ func NewSystemHandler(cfg *config.Config,
 	tenantSvc interfaces.TenantService,
 	userSvc interfaces.UserService,
 	systemSettingSvc interfaces.SystemSettingService,
+	apiKeySvc interfaces.TenantAPIKeyService,
 	auditSvc interfaces.AuditLogService,
 	taskInspector interfaces.TaskInspector,
 	knowledgeSvc interfaces.KnowledgeService,
+	storageBackendRepo interfaces.StorageBackendRepository,
 ) *SystemHandler {
 	return &SystemHandler{
-		cfg:              cfg,
-		neo4jDriver:      neo4jDriver,
-		documentReader:   documentReader,
-		tenantSvc:        tenantSvc,
-		userSvc:          userSvc,
-		systemSettingSvc: systemSettingSvc,
-		auditSvc:         auditSvc,
-		taskInspector:    taskInspector,
-		knowledgeSvc:     knowledgeSvc,
+		cfg:                cfg,
+		neo4jDriver:        neo4jDriver,
+		documentReader:     documentReader,
+		tenantSvc:          tenantSvc,
+		userSvc:            userSvc,
+		systemSettingSvc:   systemSettingSvc,
+		apiKeySvc:          apiKeySvc,
+		auditSvc:           auditSvc,
+		taskInspector:      taskInspector,
+		knowledgeSvc:       knowledgeSvc,
+		storageBackendRepo: storageBackendRepo,
 	}
+}
+
+type platformAPIKeyCreateRequest struct {
+	Name         string   `json:"name"`
+	Capabilities []string `json:"capabilities"`
+	ExpiresAt    *int64   `json:"expires_at_unix"`
+}
+
+// ListPlatformAPIKeys godoc
+// @Summary      List platform API keys
+// @Description  Lists non-workspace API keys. Full tokens are always masked. Human SystemAdmin only.
+// @Tags         System Admin
+// @Produce      json
+// @Success      200 {object} map[string]interface{}
+// @Security     Bearer
+// @Router       /system/admin/api-keys [get]
+func (h *SystemHandler) ListPlatformAPIKeys(c *gin.Context) {
+	keys, err := h.apiKeySvc.ListPlatformAPIKeys(c.Request.Context())
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("Failed to list platform API keys").WithDetails(err.Error()))
+		return
+	}
+	response := make([]tenantAPIKeyResponse, 0, len(keys))
+	for _, key := range keys {
+		item := tenantAPIKeyForResponse(key)
+		item.APIKey = maskManagedAPIKey(key.APIKey)
+		response = append(response, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": response})
+}
+
+// CreatePlatformAPIKey godoc
+// @Summary      Create a platform API key
+// @Description  Creates a capability-scoped key that may target any workspace through X-Tenant-ID. The plaintext token is returned once. Human SystemAdmin only.
+// @Tags         System Admin
+// @Accept       json
+// @Produce      json
+// @Param        request body platformAPIKeyCreateRequest true "Platform API key"
+// @Success      201 {object} map[string]interface{}
+// @Security     Bearer
+// @Router       /system/admin/api-keys [post]
+func (h *SystemHandler) CreatePlatformAPIKey(c *gin.Context) {
+	var req platformAPIKeyCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(apperrors.NewValidationError("Invalid request data").WithDetails(err.Error()))
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		c.Error(apperrors.NewValidationError("name is required"))
+		return
+	}
+	capabilities := types.NormalizeAPIKeyCapabilities(types.StringArray(req.Capabilities))
+	if len(capabilities) == 0 || len(capabilities) != len(req.Capabilities) {
+		c.Error(apperrors.NewValidationError("valid capabilities are required"))
+		return
+	}
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil {
+		value := time.Unix(*req.ExpiresAt, 0)
+		if !value.After(time.Now()) {
+			c.Error(apperrors.NewValidationError("expires_at_unix must be in the future"))
+			return
+		}
+		expiresAt = &value
+	}
+	result, err := h.apiKeySvc.CreateAPIKey(c.Request.Context(), interfaces.TenantAPIKeyCreateRequest{
+		ScopeType:    types.APIKeyScopePlatform,
+		Name:         req.Name,
+		Capabilities: []string(capabilities),
+		ExpiresAt:    expiresAt,
+	})
+	if err != nil {
+		c.Error(apperrors.NewInternalServerError("Failed to create platform API key").WithDetails(err.Error()))
+		return
+	}
+	item := tenantAPIKeyForResponse(result.APIKey)
+	item.APIKey = maskManagedAPIKey(result.Token)
+	h.emitAPIKeyAudit(c.Request.Context(), types.AuditActionSystemAPIKeyCreated, result.APIKey)
+	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
+		"data":    tenantAPIKeyCreateResponse{tenantAPIKeyResponse: item, Token: result.Token},
+	})
+}
+
+// DeletePlatformAPIKey godoc
+// @Summary      Revoke a platform API key
+// @Description  Immediately revokes a platform API key. Human SystemAdmin only.
+// @Tags         System Admin
+// @Produce      json
+// @Param        key_id path int true "API key ID"
+// @Success      200 {object} map[string]interface{}
+// @Security     Bearer
+// @Router       /system/admin/api-keys/{key_id} [delete]
+func (h *SystemHandler) DeletePlatformAPIKey(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("key_id"), 10, 64)
+	if err != nil || id == 0 {
+		c.Error(apperrors.NewBadRequestError("Invalid API key ID"))
+		return
+	}
+	if err := h.apiKeySvc.RevokePlatformAPIKey(c.Request.Context(), id); err != nil {
+		c.Error(apperrors.NewNotFoundError("Platform API key not found"))
+		return
+	}
+	h.emitAPIKeyAudit(c.Request.Context(), types.AuditActionSystemAPIKeyRevoked, &types.TenantAPIKey{ID: id})
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func maskManagedAPIKey(token string) string {
+	token = strings.TrimSpace(token)
+	if len(token) <= 12 {
+		return "***"
+	}
+	return token[:7] + "..." + token[len(token)-4:]
+}
+
+func (h *SystemHandler) emitAPIKeyAudit(ctx context.Context, action types.AuditAction, key *types.TenantAPIKey) {
+	if h.auditSvc == nil || key == nil {
+		return
+	}
+	actorID, _ := types.UserIDFromContext(ctx)
+	details, _ := json.Marshal(map[string]any{
+		"scope_type":   types.APIKeyScopePlatform,
+		"capabilities": key.Capabilities,
+	})
+	_ = h.auditSvc.Log(ctx, &types.AuditLog{
+		TenantID: 0, ActorUserID: actorID, ActorRole: systemAuditActorRole(ctx),
+		Action: action, TargetType: "api_key", TargetID: strconv.FormatUint(key.ID, 10),
+		Outcome: types.AuditOutcomeSuccess, Details: types.JSON(details),
+	})
+}
+
+func systemAuditActorRole(ctx context.Context) string {
+	if scope, ok := types.TenantAPIKeyScopeFromContext(ctx); ok && scope.IsPlatform() {
+		return "platform_api_key"
+	}
+	return "system_admin"
 }
 
 // emitAdminAudit writes one audit row for a system-admin lifecycle event
@@ -113,7 +259,7 @@ func (h *SystemHandler) emitAdminAudit(
 		// events (matches AuditActionSystemSettingChanged).
 		TenantID:    0,
 		ActorUserID: actorID,
-		ActorRole:   "system_admin",
+		ActorRole:   systemAuditActorRole(ctx),
 		Action:      action,
 		TargetType:  "user",
 		Outcome:     types.AuditOutcomeSuccess,
@@ -502,6 +648,40 @@ func (h *SystemHandler) getMinioConfig(c *gin.Context) (endpoint, accessKeyID, s
 	return
 }
 
+// activeBackendProviders returns the set of storage providers that have at
+// least one active multi-instance backend registered for the caller's
+// workspace. Used to keep GetStorageEngineStatus in sync with the new Storage
+// settings UI, which writes to storage_backends rather than the legacy
+// tenant.StorageEngineConfig singleton. Best-effort and nil-safe: a missing
+// repo, missing tenant, or query error yields an empty set so callers fall
+// back to the legacy config checks.
+func (h *SystemHandler) activeBackendProviders(c *gin.Context) map[string]bool {
+	result := map[string]bool{}
+	if h.storageBackendRepo == nil {
+		return result
+	}
+	v, exists := c.Get(types.TenantInfoContextKey.String())
+	if !exists {
+		return result
+	}
+	tenant, ok := v.(*types.Tenant)
+	if !ok || tenant == nil {
+		return result
+	}
+	backends, err := h.storageBackendRepo.List(c.Request.Context(), tenant.ID)
+	if err != nil {
+		logger.Warnf(c.Request.Context(), "[storage] list backends for status failed: tenant=%d err=%v", tenant.ID, err)
+		return result
+	}
+	for _, backend := range backends {
+		if backend == nil || backend.Status != types.StorageBackendStatusActive {
+			continue
+		}
+		result[strings.ToLower(strings.TrimSpace(backend.Provider))] = true
+	}
+	return result
+}
+
 // isMinioConfigured checks whether MinIO connection info is available (from tenant config or env).
 func (h *SystemHandler) isMinioConfigured(c *gin.Context) bool {
 	endpoint, accessKeyID, secretAccessKey := h.getMinioConfig(c)
@@ -559,6 +739,17 @@ func (h *SystemHandler) isKS3Configured(c *gin.Context) bool {
 	return false
 }
 
+// isOBSConfigured checks whether OBS connection info is available from tenant config or env.
+func (h *SystemHandler) isOBSConfigured(c *gin.Context) bool {
+	if v, exists := c.Get(types.TenantInfoContextKey.String()); exists {
+		if tenant, ok := v.(*types.Tenant); ok && tenant != nil && tenant.StorageEngineConfig != nil && tenant.StorageEngineConfig.OBS != nil {
+			obsConf := tenant.StorageEngineConfig.OBS
+			return obsConf.Endpoint != "" && obsConf.Region != "" && obsConf.AccessKey != "" && obsConf.SecretKey != "" && obsConf.BucketName != ""
+		}
+	}
+	return h.isOBSEnvAvailable()
+}
+
 // isTOSEnvAvailable checks whether TOS env vars are set.
 func (h *SystemHandler) isTOSEnvAvailable() bool {
 	return os.Getenv("TOS_ENDPOINT") != "" &&
@@ -568,9 +759,18 @@ func (h *SystemHandler) isTOSEnvAvailable() bool {
 		os.Getenv("TOS_BUCKET_NAME") != ""
 }
 
+// isOBSEnvAvailable checks whether OBS env vars are set.
+func (h *SystemHandler) isOBSEnvAvailable() bool {
+	return os.Getenv("OBS_ENDPOINT") != "" &&
+		os.Getenv("OBS_REGION") != "" &&
+		os.Getenv("OBS_ACCESS_KEY") != "" &&
+		os.Getenv("OBS_SECRET_KEY") != "" &&
+		os.Getenv("OBS_BUCKET_NAME") != ""
+}
+
 // StorageEngineStatusItem describes one storage engine's availability and description.
 type StorageEngineStatusItem struct {
-	Name        string `json:"name"` // "local", "minio", "cos", "tos", "s3", "oss", "ks3"
+	Name        string `json:"name"` // "local", "minio", "cos", "tos", "s3", "oss", "ks3", "obs"
 	Allowed     bool   `json:"allowed"`
 	Available   bool   `json:"available"`   // whether the engine can be used
 	Description string `json:"description"` // short description for UI
@@ -591,15 +791,21 @@ type GetStorageEngineStatusResponse struct {
 // @Success      200  {object}  GetStorageEngineStatusResponse
 // @Router       /system/storage-engine-status [get]
 func (h *SystemHandler) GetStorageEngineStatus(c *gin.Context) {
-	minioConfigured := h.isMinioConfigured(c)
+	// Providers that already have an active multi-instance backend registered
+	// (Settings → Storage). These are authoritative and independent of the
+	// legacy singleton tenant.StorageEngineConfig, so a workspace that only
+	// configured storage through the new UI is still reported as available.
+	activeBackend := h.activeBackendProviders(c)
+	minioConfigured := h.isMinioConfigured(c) || activeBackend["minio"]
 	minioEnvAvailable := h.isMinioEnvAvailable()
-	cosConfigured := h.isCOSConfigured(c)
-	tosConfigured := h.isTOSConfigured(c)
-	s3Configured := h.isS3Configured(c)
-	ossConfigured := h.isOSSConfigured(c)
-	ks3Configured := h.isKS3Configured(c)
+	cosConfigured := h.isCOSConfigured(c) || activeBackend["cos"]
+	tosConfigured := h.isTOSConfigured(c) || activeBackend["tos"]
+	s3Configured := h.isS3Configured(c) || activeBackend["s3"]
+	ossConfigured := h.isOSSConfigured(c) || activeBackend["oss"]
+	ks3Configured := h.isKS3Configured(c) || activeBackend["ks3"]
+	obsConfigured := h.isOBSConfigured(c) || activeBackend["obs"]
 	allowed := getAllowedStorageProviders()
-	allowedProviders := make([]string, 0, len(supportedStorageProviders))
+	allowedProviders := make([]string, 0, len(getSupportedStorageProviders()))
 	for _, provider := range getSupportedStorageProviders() {
 		if allowed[provider] {
 			allowedProviders = append(allowedProviders, provider)
@@ -613,6 +819,7 @@ func (h *SystemHandler) GetStorageEngineStatus(c *gin.Context) {
 		{Name: "s3", Allowed: allowed["s3"], Available: s3Configured, Description: "AWS S3 与兼容对象存储服务，适合公有云与混合云部署"},
 		{Name: "oss", Allowed: allowed["oss"], Available: ossConfigured, Description: "阿里云对象存储服务，适合公有云部署，支持 S3 兼容协议"},
 		{Name: "ks3", Allowed: allowed["ks3"], Available: ks3Configured, Description: "金山云对象存储服务，适合公有云部署"},
+		{Name: "obs", Allowed: allowed["obs"], Available: obsConfigured, Description: "华为云对象存储服务，适合公有云部署"},
 	}
 	c.JSON(200, gin.H{
 		"code": 0,
@@ -630,28 +837,9 @@ var ossFieldPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
 
 // sanitizeStorageCheckError converts a raw storage connectivity error into a safe
 // user-facing message that does not leak internal network details (hostnames, IPs, ports).
+// The concrete mapping lives in internal/utils so the service layer can share it.
 func sanitizeStorageCheckError(err error) string {
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "Endpoint url cannot have fully qualified paths"):
-		return "Endpoint 地址格式错误：请去除 http:// 或 https:// 前缀，只填写域名或 IP 地址和端口（例如：minio.example.com:9000）"
-	case strings.Contains(msg, "no such host"):
-		return "DNS 解析失败，请检查地址是否正确"
-	case strings.Contains(msg, "connection refused"):
-		return "连接被拒绝，请确认服务已启动且端口正确"
-	case strings.Contains(msg, "no route to host"):
-		return "无法路由到目标地址，请检查网络配置"
-	case strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "context deadline"):
-		return "连接超时，请检查网络或服务状态"
-	case strings.Contains(msg, "403") || strings.Contains(msg, "AccessDenied") || strings.Contains(msg, "access denied"):
-		return "认证失败，请检查访问凭证是否正确"
-	case strings.Contains(msg, "certificate") || strings.Contains(msg, "tls") || strings.Contains(msg, "x509"):
-		return "TLS/SSL 证书错误，请检查 SSL 配置"
-	case strings.Contains(msg, "404") || strings.Contains(msg, "NoSuchBucket"):
-		return "Bucket 不存在，请检查名称和 Region"
-	default:
-		return "连接失败，请检查配置参数是否正确"
-	}
+	return secutils.SanitizeStorageConnectivityError(err)
 }
 
 // storageEndpointHost extracts the hostname from a storage endpoint string.
@@ -1724,7 +1912,7 @@ func (h *SystemHandler) emitQueueTaskAudit(
 	_ = h.auditSvc.Log(ctx, &types.AuditLog{
 		TenantID:    0,
 		ActorUserID: actorID,
-		ActorRole:   "system_admin",
+		ActorRole:   systemAuditActorRole(ctx),
 		Action:      action,
 		TargetType:  targetType,
 		TargetID:    targetID,
@@ -2073,7 +2261,7 @@ func (h *SystemHandler) ApplyDefaultStorageQuotaToAllTenants(c *gin.Context) {
 		_ = h.auditSvc.Log(ctx, &types.AuditLog{
 			TenantID:    0,
 			ActorUserID: actorID,
-			ActorRole:   "system_admin",
+			ActorRole:   systemAuditActorRole(ctx),
 			Action:      types.AuditActionSystemSettingChanged,
 			TargetType:  "tenant_storage_quota",
 			TargetID:    "all",

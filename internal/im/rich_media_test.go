@@ -3,15 +3,50 @@ package im
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type recordingIMStorageResolver struct {
+	fileService interfaces.FileService
+	contextSeen bool
+	backendID   string
+	provider    string
+}
+
+func (r *recordingIMStorageResolver) ResolveFileService(
+	ctx context.Context,
+	_ *types.Tenant,
+	backendID string,
+	provider string,
+	_ string,
+) (interfaces.FileService, string, error) {
+	r.contextSeen = ctx.Value(imStorageResolverContextKey{}) == "request-context"
+	r.backendID = backendID
+	r.provider = provider
+	return r.fileService, provider, nil
+}
+
+func (r *recordingIMStorageResolver) ResolveBackend(
+	context.Context,
+	*types.Tenant,
+	string,
+	string,
+) (*types.StorageBackend, error) {
+	return nil, nil
+}
+
+type imStorageResolverContextKey struct{}
 
 type recordingInlineImageUploader struct {
 	mu       sync.Mutex
@@ -84,6 +119,47 @@ func TestPrepareIMDisplayContent_DeduplicatesLocalImages(t *testing.T) {
 	require.Len(t, images, 1)
 	assert.Equal(t, "one", images[0].Caption)
 	assert.Equal(t, "正文", content)
+}
+
+func TestPrepareIMDisplayContent_UsesWorkspaceStorageResolver(t *testing.T) {
+	fileService := &stubIMFileService{
+		getFile: func(_ context.Context, filePath string) (io.ReadCloser, error) {
+			assert.Equal(t, "storage://backend-a/local://10000/exports/a.png", filePath)
+			return io.NopCloser(strings.NewReader("workspace-image")), nil
+		},
+	}
+	storageResolver := &recordingIMStorageResolver{fileService: fileService}
+	svc := &Service{storageResolver: storageResolver}
+	tenant := &types.Tenant{ID: 10000}
+	ctx := context.WithValue(context.Background(), imStorageResolverContextKey{}, "request-context")
+
+	content, images := svc.prepareIMDisplayContent(ctx,
+		"![workspace](storage://backend-a/local://10000/exports/a.png)", tenant, true)
+
+	require.Len(t, images, 1)
+	assert.Empty(t, content)
+	assert.Equal(t, []byte("workspace-image"), images[0].Data)
+	assert.True(t, storageResolver.contextSeen)
+	assert.Equal(t, "backend-a", storageResolver.backendID)
+	assert.Equal(t, "local", storageResolver.provider)
+}
+
+func TestPrepareIMDisplayContent_ExtractsCanonicalResourceImage(t *testing.T) {
+	const resourcePath = "resource://AbCdEfGhIjKlMnOpQrStUv"
+	defaultFileService := &stubIMFileService{
+		getFile: func(_ context.Context, filePath string) (io.ReadCloser, error) {
+			assert.Equal(t, resourcePath, filePath)
+			return io.NopCloser(strings.NewReader("resource-image")), nil
+		},
+	}
+	svc := &Service{defaultFileSvc: defaultFileService}
+
+	content, images := svc.prepareIMDisplayContent(context.Background(),
+		"![resource]("+resourcePath+")", &types.Tenant{ID: 10000}, true)
+
+	require.Len(t, images, 1)
+	assert.Empty(t, content)
+	assert.Equal(t, []byte("resource-image"), images[0].Data)
 }
 
 func TestInlineImageRewriter_PreservesPositionsAndCachesUploads(t *testing.T) {

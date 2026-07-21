@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/event"
+	"github.com/Tencent/WeKnora/internal/llmreference"
+	"github.com/Tencent/WeKnora/internal/llmresource"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -64,14 +66,18 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		logStreamFallbackActivation(ctx, chatManage, primaryErr)
 	}
 
-	// Prepare base messages without history
-
 	activeModelID := chatManage.ChatModelID
-	chatMessages := prepareMessagesWithHistory(chatManage)
+	activeSupportsVision := chatManage.ChatModelSupportsVision
 	if usingFallback {
 		activeModelID = chatManage.FallbackModelID
-		chatMessages = prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+		activeSupportsVision = chatManage.FallbackSupportsVision
 	}
+
+	// Prepare messages and request-local registries for the active model. A
+	// fallback with different vision support receives a separately prepared set.
+	chatMessages, sourceRefs, resourceRefs := prepareEncodedMessagesWithReferences(
+		ctx, chatManage, activeSupportsVision,
+	)
 	pipelineInfo(ctx, "Stream", "messages_ready", map[string]interface{}{
 		"message_count": len(chatMessages),
 		"system_prompt": chatMessages[0].Content,
@@ -102,7 +108,9 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	if err != nil && !usingFallback && chatManage.FallbackModelID != "" && chat.ShouldFailover(ctx, err) {
 		fallbackModel, fallbackOpt, fallbackErr := prepareFallbackChatModel(ctx, p.modelService, chatManage)
 		if fallbackErr == nil {
-			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+			fallbackMessages, fallbackSourceRefs, fallbackResourceRefs := prepareEncodedMessagesWithReferences(
+				ctx, chatManage, chatManage.FallbackSupportsVision,
+			)
 			fallbackChan, fallbackAttempt, startErr := startChatStreamWithRetry(
 				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
 			)
@@ -111,6 +119,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				chatModel = fallbackModel
 				opt = fallbackOpt
 				chatMessages = fallbackMessages
+				sourceRefs = fallbackSourceRefs
+				resourceRefs = fallbackResourceRefs
 				activeModelID = chatManage.FallbackModelID
 				usingFallback = true
 				responseChan = fallbackChan
@@ -148,6 +158,21 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 	// The goroutine monitors ctx.Done() to avoid leaking when the context is cancelled
 	// and the upstream channel is not closed promptly.
 	go func() {
+		var answerDecoder *llmresource.StreamDecoder
+		var thinkingDecoder *llmresource.StreamDecoder
+		var answerRefExpander *llmreference.StreamExpander
+		var thinkingRefExpander *llmreference.StreamExpander
+		resetDecoders := func(
+			activeSourceRefs *llmreference.Registry,
+			activeResourceRefs *llmresource.Registry,
+		) {
+			answerDecoder = llmresource.NewStreamDecoder(activeResourceRefs)
+			thinkingDecoder = llmresource.NewStreamDecoder(activeResourceRefs)
+			answerRefExpander = llmreference.NewStreamExpander(activeSourceRefs)
+			thinkingRefExpander = llmreference.NewStreamExpander(activeSourceRefs)
+		}
+		resetDecoders(sourceRefs, resourceRefs)
+
 		thinkingID := fmt.Sprintf("%s-thinking", uuid.New().String()[:8])
 		answerID := fmt.Sprintf("%s-answer", uuid.New().String()[:8])
 		thinkingOpen := false
@@ -155,6 +180,73 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		answerDone := false
 		terminalErrorEmitted := false
 		outputStarted := false
+
+		emitThinkingContent := func(content string) {
+			if content == "" {
+				return
+			}
+			outputStarted = true
+			thinkingOpen = true
+			_ = eventBus.Emit(ctx, types.Event{
+				ID:        thinkingID,
+				Type:      types.EventType(event.EventAgentThought),
+				SessionID: chatManage.SessionID,
+				Data: event.AgentThoughtData{
+					Content: content,
+					Done:    false,
+				},
+			})
+		}
+
+		takeThinkingTail := func() string {
+			return thinkingRefExpander.Feed(thinkingDecoder.Flush()) + thinkingRefExpander.Flush()
+		}
+
+		closeThinking := func() {
+			emitThinkingContent(takeThinkingTail())
+			if !thinkingOpen {
+				return
+			}
+			_ = eventBus.Emit(ctx, types.Event{
+				ID:        thinkingID,
+				Type:      types.EventType(event.EventAgentThought),
+				SessionID: chatManage.SessionID,
+				Data: event.AgentThoughtData{
+					Done: true,
+				},
+			})
+			thinkingOpen = false
+		}
+
+		emitAnswerContent := func(content string, done bool) {
+			if content != "" {
+				outputStarted = true
+				answerBuilder.WriteString(content)
+			}
+			_ = eventBus.Emit(ctx, types.Event{
+				ID:        answerID,
+				Type:      types.EventType(event.EventAgentFinalAnswer),
+				SessionID: chatManage.SessionID,
+				Data: event.AgentFinalAnswerData{
+					Content: content,
+					Done:    done,
+				},
+			})
+		}
+
+		takeAnswerTail := func() string {
+			return answerRefExpander.Feed(answerDecoder.Flush()) + answerRefExpander.Flush()
+		}
+
+		// flushDecoders drains any suffix held while bridging aliases split
+		// across provider chunks. Emitting through the stateful helpers keeps
+		// outputStarted and answerBuilder consistent with what consumers saw.
+		flushDecoders := func() {
+			closeThinking()
+			if answerTail := takeAnswerTail(); answerTail != "" {
+				emitAnswerContent(answerTail, false)
+			}
+		}
 
 		activateFallback := func(cause error) bool {
 			if usingFallback || outputStarted || chatManage.FallbackModelID == "" ||
@@ -169,7 +261,9 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				})
 				return false
 			}
-			fallbackMessages := prepareMessagesWithHistoryForVision(chatManage, chatManage.FallbackSupportsVision)
+			fallbackMessages, fallbackSourceRefs, fallbackResourceRefs := prepareEncodedMessagesWithReferences(
+				ctx, chatManage, chatManage.FallbackSupportsVision,
+			)
 			fallbackChan, fallbackAttempt, fallbackErr := startChatStreamWithRetry(
 				ctx, fallbackModel, chatManage.FallbackModelID, fallbackMessages, fallbackOpt,
 			)
@@ -186,10 +280,15 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			chatModel = fallbackModel
 			opt = fallbackOpt
 			chatMessages = fallbackMessages
+			sourceRefs = fallbackSourceRefs
+			resourceRefs = fallbackResourceRefs
 			activeModelID = chatManage.FallbackModelID
 			usingFallback = true
 			responseChan = fallbackChan
 			streamAttempt = fallbackAttempt
+			// No transformed output has escaped, so pending bytes from the failed
+			// primary attempt must not contaminate the fallback response.
+			resetDecoders(sourceRefs, resourceRefs)
 			return true
 		}
 
@@ -201,8 +300,14 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 					}
 					streamAttempt++
 					nextChan, restartErr := chatModel.ChatStream(ctx, chatMessages, opt)
-					if restartErr == nil && nextChan != nil {
+					if restartErr == nil && nextChan == nil {
+						restartErr = errors.New("chat stream returned nil channel")
+					}
+					if restartErr == nil {
 						responseChan = nextChan
+						// A new stream attempt starts with clean decoder buffers while
+						// retaining the registries used to encode its identical prompt.
+						resetDecoders(sourceRefs, resourceRefs)
 						pipelineWarn(ctx, "Stream", "stream_retry", map[string]interface{}{
 							"chat_model": activeModelID,
 							"attempt":    streamAttempt,
@@ -221,29 +326,14 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 			return activateFallback(cause)
 		}
 
-		closeThinking := func() {
-			if !thinkingOpen {
-				return
-			}
-			eventBus.Emit(ctx, types.Event{
-				ID:        thinkingID,
-				Type:      types.EventType(event.EventAgentThought),
-				SessionID: chatManage.SessionID,
-				Data: event.AgentThoughtData{
-					Done: true,
-				},
-			})
-			thinkingOpen = false
-		}
-
 		emitTerminalError := func(errorCode, detail string) {
 			if terminalErrorEmitted {
 				return
 			}
 			terminalErrorEmitted = true
-			closeThinking()
+			flushDecoders()
 			userMessage := streamErrorUserMessage(chatManage.Language, answerBuilder.Len() > 0)
-			eventBus.Emit(ctx, types.Event{
+			_ = eventBus.Emit(ctx, types.Event{
 				ID:        fmt.Sprintf("%s-error", uuid.New().String()[:8]),
 				Type:      types.EventType(event.EventError),
 				SessionID: chatManage.SessionID,
@@ -264,7 +354,7 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 		for {
 			select {
 			case <-ctx.Done():
-				closeThinking()
+				flushDecoders()
 				pipelineInfo(ctx, "Stream", "context_cancelled", map[string]interface{}{
 					"session_id": chatManage.SessionID,
 				})
@@ -272,7 +362,6 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 
 			case response, ok := <-responseChan:
 				if !ok {
-					closeThinking()
 					pipelineInfo(ctx, "Stream", "channel_close", map[string]interface{}{
 						"session_id": chatManage.SessionID,
 					})
@@ -287,7 +376,9 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 							continue streamLoop
 						}
 						emitTerminalError("chat_stream_closed", "model stream closed before sending a done event")
+						return
 					}
+					flushDecoders()
 					return
 				}
 
@@ -307,19 +398,8 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				}
 
 				if response.ResponseType == types.ResponseTypeThinking {
-					if response.Content != "" {
-						outputStarted = true
-						thinkingOpen = true
-						eventBus.Emit(ctx, types.Event{
-							ID:        thinkingID,
-							Type:      types.EventType(event.EventAgentThought),
-							SessionID: chatManage.SessionID,
-							Data: event.AgentThoughtData{
-								Content: response.Content,
-								Done:    false,
-							},
-						})
-					}
+					response.Content = thinkingRefExpander.Feed(thinkingDecoder.Feed(response.Content))
+					emitThinkingContent(response.Content)
 					if response.Done {
 						closeThinking()
 					}
@@ -327,7 +407,14 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 				}
 
 				if response.ResponseType == types.ResponseTypeAnswer {
+					response.Content = answerRefExpander.Feed(answerDecoder.Feed(response.Content))
 					closeThinking()
+					if response.Done {
+						// A provider may mark the same chunk Done while an alias
+						// suffix is still buffered. Include that suffix in the final
+						// event before deciding whether the answer is empty.
+						response.Content += takeAnswerTail()
+					}
 					if response.Content != "" {
 						outputStarted = true
 						answerBuilder.WriteString(response.Content)
@@ -342,9 +429,17 @@ func (p *PluginChatCompletionStream) OnEvent(ctx context.Context,
 					}
 					if response.Done {
 						answerDone = true
-						warnIfAnswerMissingKBCitations(ctx, "Stream", chatManage, answerBuilder.String())
+						if orphans := resourceRefs.OrphanAliases(answerBuilder.String()); len(orphans) > 0 {
+							pipelineWarn(ctx, "Stream", "orphan_resource_aliases", map[string]interface{}{
+								"session_id": chatManage.SessionID,
+								"aliases":    orphans,
+							})
+						}
+						if chatManage.CitationsEnabled() {
+							warnIfAnswerMissingKBCitations(ctx, "Stream", chatManage, answerBuilder.String())
+						}
 					}
-					eventBus.Emit(ctx, types.Event{
+					_ = eventBus.Emit(ctx, types.Event{
 						ID:        answerID,
 						Type:      types.EventType(event.EventAgentFinalAnswer),
 						SessionID: chatManage.SessionID,

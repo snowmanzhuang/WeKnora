@@ -84,7 +84,7 @@ func TestImageCacheKey_StripsQuery(t *testing.T) {
 }
 
 func TestResolveMarkdownImages_NoImageUnchanged(t *testing.T) {
-	a := &Adapter{}
+	a := &Adapter{region: RegionFeishu}
 	in := "hello **world** [link](https://example.com)"
 	if got := a.resolveMarkdownImages(context.Background(), "tok", in); got != in {
 		t.Errorf("content without image was modified: %q", got)
@@ -92,7 +92,7 @@ func TestResolveMarkdownImages_NoImageUnchanged(t *testing.T) {
 }
 
 func TestResolveMarkdownImages_FallbackToLinkOnFailure(t *testing.T) {
-	a := &Adapter{}
+	a := &Adapter{region: RegionFeishu}
 	// A direct-IP loopback URL fails SSRF validation before any network call,
 	// so the image must degrade to a plain markdown link (never left as ![]()).
 	in := "see ![diagram](http://127.0.0.1/x.png) here"
@@ -250,5 +250,18 @@ func TestSendReply_WithInlineImageSendsStaticCard(t *testing.T) {
 	}
 	if sentPayload["msg_type"] != "interactive" {
 		t.Fatalf("msg_type = %v", sentPayload["msg_type"])
+	}
+}
+
+// An image with no alt text falls back to the region's own label, so Lark users
+// do not get a Chinese link label.
+func TestResolveMarkdownImages_FallbackLabelFollowsRegion(t *testing.T) {
+	for _, region := range []Region{RegionFeishu, RegionLark} {
+		a := &Adapter{region: region}
+		got := a.resolveMarkdownImages(context.Background(), "tok", "![](http://127.0.0.1/x.png)")
+		want := "[" + region.ImageFallbackLabel + "](http://127.0.0.1/x.png)"
+		if got != want {
+			t.Errorf("%s fallback = %q, want %q", region.Label, got, want)
+		}
 	}
 }
