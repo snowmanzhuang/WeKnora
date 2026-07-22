@@ -113,6 +113,27 @@ func SessionTenantIDFromContext(ctx context.Context) (uint64, bool) {
 	return TenantIDFromContext(ctx)
 }
 
+// WithChannelSessionReadAccess grants this internal request read access to one
+// exact channel-managed session. Callers must only set it after authenticating
+// the external channel callback and resolving its session mapping.
+func WithChannelSessionReadAccess(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, ChannelSessionReadIDContextKey, sessionID)
+}
+
+// HasChannelSessionReadAccess reports whether ctx carries an exact-session
+// internal read grant. It deliberately does not grant tenant-wide access.
+func HasChannelSessionReadAccess(ctx context.Context, sessionID string) bool {
+	if ctx == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	grantedID, _ := ctx.Value(ChannelSessionReadIDContextKey).(string)
+	return strings.TrimSpace(grantedID) == strings.TrimSpace(sessionID)
+}
+
 // WithMCPOAuthNonInteractive marks ctx as originating from a channel that cannot
 // complete an in-conversation MCP OAuth prompt (e.g. an IM bot). The agent uses
 // this to emit a one-shot authorization notice instead of blocking on the OAuth

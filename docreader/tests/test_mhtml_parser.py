@@ -234,6 +234,9 @@ class MHTMLParserTest(unittest.TestCase):
     def test_registry_resolves_mhtml(self):
         self.assertIs(registry.get_parser_class("", "mhtml"), MHTMLParser)
 
+    def test_registry_resolves_mht_alias(self):
+        self.assertIs(registry.get_parser_class("", "mht"), MHTMLParser)
+
 
 if __name__ == "__main__":
     unittest.main()

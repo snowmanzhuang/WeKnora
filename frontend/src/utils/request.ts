@@ -264,6 +264,9 @@ export function postUpload(
   config: any = {},
 ): Promise<any> {
   return instance.post(url, data, {
+    // Large document uploads can legitimately exceed the shared 30-second
+    // request timeout. Keep uploads unlimited unless the caller sets one.
+    timeout: 0,
     ...config,
     headers: {
       "Content-Type": "multipart/form-data",

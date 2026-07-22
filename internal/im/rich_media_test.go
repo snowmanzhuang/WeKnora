@@ -173,7 +173,7 @@ func TestInlineImageRewriter_PreservesPositionsAndCachesUploads(t *testing.T) {
 	rewriter := &imInlineImageRewriter{
 		uploader: uploader,
 		incoming: &IncomingMessage{Platform: PlatformFeishu},
-		resolver: newIMFileServiceResolver(nil, nil),
+		resolver: newIMFileServiceResolver(nil, nil, nil, nil),
 		refs:     make(map[string]string),
 		failures: make(map[string]time.Time),
 		tracked:  make(map[string]struct{}),
@@ -200,7 +200,7 @@ func TestInlineImageRewriter_UploadFailureDegradesOnlyImage(t *testing.T) {
 	rewriter := &imInlineImageRewriter{
 		uploader: uploader,
 		incoming: &IncomingMessage{Platform: PlatformFeishu},
-		resolver: newIMFileServiceResolver(nil, nil),
+		resolver: newIMFileServiceResolver(nil, nil, nil, nil),
 		refs:     make(map[string]string),
 		failures: make(map[string]time.Time),
 		tracked:  make(map[string]struct{}),

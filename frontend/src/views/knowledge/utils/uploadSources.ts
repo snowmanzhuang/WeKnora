@@ -1,4 +1,5 @@
 import { kbFileTypeVerification } from '@/utils'
+import { normalizeUploadFile } from './uploadFileNormalization'
 
 export const UPLOAD_VIDEO_EXTENSIONS = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']
 
@@ -47,7 +48,8 @@ export function filterUploadFiles(
   let hiddenFileCount = 0
   const multiFile = options.multiFile ?? list.length > 1
 
-  for (const file of list) {
+  for (const sourceFile of list) {
+    const file = normalizeUploadFile(sourceFile)
     if (options.fromFolder) {
       const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
       if (relativePath.split('/').some(part => part.startsWith('.'))) {

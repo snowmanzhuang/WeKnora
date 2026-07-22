@@ -790,7 +790,7 @@ import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
 import { listOrganizationSharedKnowledgeBases, type SharedKnowledgeBase, type OrganizationSharedKnowledgeBaseItem, type SourceFromAgentInfo } from '@/api/organization'
-import { mergeAllScopeKnowledgeBases, type OwnedKnowledgeBase, type SharedKnowledgeBaseLike } from './kbListMerge'
+import { compareKnowledgeBaseNames, mergeAllScopeKnowledgeBases, type OwnedKnowledgeBase, type SharedKnowledgeBaseLike } from './kbListMerge'
 import KnowledgeBaseEditorModal from './KnowledgeBaseEditorModal.vue'
 import KbWikiBadge from './components/KbWikiBadge.vue'
 import ShareKnowledgeBaseDialog from '@/components/ShareKnowledgeBaseDialog.vue'
@@ -920,7 +920,7 @@ const spaceKbsLoading = ref(false)
 // 子段内保留服务端的置顶优先顺序。给 contributor 视图把「本空间 · 仅查看」
 // 分组标题正好插在过渡处；其他角色看不到标题，纯排序变化也无害。
 // Ordering for the 「本空间」 tab:
-//   1. pinned KBs (mine or teammate), newest pin first
+//   1. pinned KBs (mine or teammate), naturally sorted by name
 //   2. my non-pinned KBs
 //   3. teammate non-pinned KBs (rendered under the「本空间 · 仅查看」header)
 //
@@ -934,17 +934,10 @@ const sortedMineKbs = computed<KB[]>(() => {
     const ap = a.is_pinned ? 0 : 1
     const bp = b.is_pinned ? 0 : 1
     if (ap !== bp) return ap - bp
-    if (a.is_pinned && b.is_pinned) {
-      const at = a.pinned_at ? Date.parse(a.pinned_at as string) : 0
-      const bt = b.pinned_at ? Date.parse(b.pinned_at as string) : 0
-      if (at !== bt) return bt - at
-    }
     const am = isMyKb(a) ? 0 : 1
     const bm = isMyKb(b) ? 0 : 1
     if (am !== bm) return am - bm
-    const ac = a.created_at ? Date.parse(a.created_at as string) : 0
-    const bc = b.created_at ? Date.parse(b.created_at as string) : 0
-    return bc - ac
+    return compareKnowledgeBaseNames(a, b)
   })
 })
 
@@ -957,7 +950,8 @@ const sortedSpaceKbsList = computed(() => {
     if (aMine !== bMine) return aMine - bMine
     const aE = isSharedKbEditable(a.permission) ? 0 : 1
     const bE = isSharedKbEditable(b.permission) ? 0 : 1
-    return aE - bE
+    if (aE !== bE) return aE - bE
+    return compareKnowledgeBaseNames(a.knowledge_base || {}, b.knowledge_base || {})
   })
 })
 const spaceCountByOrg = ref<Record<string, number>>({})

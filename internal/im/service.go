@@ -213,7 +213,11 @@ func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenan
 func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) string {
 	content = stripImageXMLTags(content)
 	content = stripIMCitationTags(content)
-	resolver := newIMFileServiceResolver(tenant, defaultFileSvc, storageResolvers...)
+	var storageResolver interfaces.StorageBackendResolver
+	if len(storageResolvers) > 0 {
+		storageResolver = storageResolvers[0]
+	}
+	resolver := newIMFileServiceResolver(tenant, defaultFileSvc, storageResolver, nil)
 	resolver.ctx = ctx
 	content = rewriteStorageURLs(ctx, content, resolver)
 	return content
@@ -234,25 +238,57 @@ type imFileServiceResolver struct {
 	tenant          *types.Tenant
 	defaultSvc      interfaces.FileService
 	storageResolver interfaces.StorageBackendResolver
+	resourceCatalog interfaces.ResourceCatalog
 	ctx             context.Context
 	cache           map[string]interfaces.FileService
 }
 
-func newIMFileServiceResolver(tenant *types.Tenant, defaultSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) *imFileServiceResolver {
-	resolver := &imFileServiceResolver{
-		tenant:     tenant,
-		defaultSvc: defaultSvc,
-		ctx:        context.Background(),
-		cache:      make(map[string]interfaces.FileService),
+func newIMFileServiceResolver(
+	tenant *types.Tenant,
+	defaultSvc interfaces.FileService,
+	storageResolver interfaces.StorageBackendResolver,
+	resourceCatalog interfaces.ResourceCatalog,
+) *imFileServiceResolver {
+	return &imFileServiceResolver{
+		tenant:          tenant,
+		defaultSvc:      defaultSvc,
+		storageResolver: storageResolver,
+		resourceCatalog: resourceCatalog,
+		ctx:             context.Background(),
+		cache:           make(map[string]interfaces.FileService),
 	}
-	if len(storageResolvers) > 0 {
-		resolver.storageResolver = storageResolvers[0]
-	}
-	return resolver
 }
 
 func (r *imFileServiceResolver) resolve(filePath string) interfaces.FileService {
 	if _, ok := types.ParseResourcePath(filePath); ok {
+		// A resource can belong to a named storage backend. Sending it through
+		// the process-wide default service treats the storage:// wrapper as a
+		// local path (for example /data/files/storage:/.../local:/...) and makes
+		// an existing image appear missing. Resolve the catalog metadata first
+		// so the owning backend can unwrap the path before doing I/O.
+		if r.resourceCatalog != nil {
+			resource, err := r.resourceCatalog.Resolve(r.ctx, filePath)
+			if err != nil {
+				logger.Warnf(r.ctx, "[IM] resolve resource metadata failed: path=%s err=%v", filePath, err)
+			} else if resource != nil {
+				backendID := strings.TrimSpace(resource.StorageBackendID)
+				physicalPath := strings.TrimSpace(resource.PhysicalPath)
+				pathBackendID, innerPath, scoped := types.ParseStorageBackendPath(physicalPath)
+				if backendID == "" {
+					backendID = pathBackendID
+				}
+				if scoped {
+					physicalPath = innerPath
+				}
+				provider := strings.ToLower(strings.TrimSpace(resource.Provider))
+				if provider == "" {
+					provider = types.ParseProviderScheme(physicalPath)
+				}
+				if svc := r.resolveBackend(backendID, provider); svc != nil {
+					return svc
+				}
+			}
+		}
 		return r.defaultSvc
 	}
 	backendID, _, _ := types.ParseStorageBackendPath(filePath)
@@ -265,6 +301,10 @@ func (r *imFileServiceResolver) resolve(filePath string) interfaces.FileService 
 			return nil
 		}
 	}
+	return r.resolveBackend(backendID, provider)
+}
+
+func (r *imFileServiceResolver) resolveBackend(backendID, provider string) interfaces.FileService {
 	cacheKey := backendID + ":" + provider
 	if svc, ok := r.cache[cacheKey]; ok {
 		return svc
@@ -315,7 +355,7 @@ func buildIMFileServiceForProvider(
 
 // resolveIMFileServiceForPath is a test/helper entry point without caching.
 func resolveIMFileServiceForPath(tenant *types.Tenant, filePath string, defaultSvc interfaces.FileService) interfaces.FileService {
-	return newIMFileServiceResolver(tenant, defaultSvc).resolve(filePath)
+	return newIMFileServiceResolver(tenant, defaultSvc, nil, nil).resolve(filePath)
 }
 
 const (
@@ -402,6 +442,7 @@ type Service struct {
 	// Used when tenant StorageEngineConfig cannot build a service for the URL scheme.
 	defaultFileSvc  interfaces.FileService
 	storageResolver interfaces.StorageBackendResolver
+	resourceCatalog interfaces.ResourceCatalog
 
 	// cmdRegistry holds all registered slash-commands.
 	cmdRegistry *CommandRegistry
@@ -650,6 +691,17 @@ func buildIMLastRequestState(agentID string, customAgent *types.CustomAgent, kbI
 	return state
 }
 
+func channelKnowledgeBaseIDs(channel *IMChannel) []string {
+	if channel == nil {
+		return nil
+	}
+	kbID := strings.TrimSpace(channel.KnowledgeBaseID)
+	if kbID == "" {
+		return nil
+	}
+	return []string{kbID}
+}
+
 func createIMUserMessagePayload(sessionID, content, requestID string) *types.Message {
 	return &types.Message{
 		SessionID:   sessionID,
@@ -815,6 +867,7 @@ func NewService(
 	redisClient *redis.Client,
 	appCfg *config.Config,
 	storageResolver interfaces.StorageBackendResolver,
+	resourceCatalog interfaces.ResourceCatalog,
 ) *Service {
 	// Resolve IM configuration with defaults.
 	workers, maxQueue, maxPerUser, globalMaxWorkers, rlWindow, rlMax := resolveIMConfig(appCfg)
@@ -840,6 +893,7 @@ func NewService(
 		streamManager:    streamManager,
 		defaultFileSvc:   defaultFileSvc,
 		storageResolver:  storageResolver,
+		resourceCatalog:  resourceCatalog,
 		oauthManager:     oauthManager,
 		cmdRegistry:      registry,
 		channels:         make(map[string]*channelState),
@@ -1540,8 +1594,12 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		return nil
 	}
 
-	// 4. Get the WeKnora session
-	session, err := s.sessionService.GetSession(sessionCtx, channelSession.SessionID)
+	// 4. Get the WeKnora session. The IM channel and tenant were already
+	// authenticated above, so use the tenant-scoped internal lookup here.
+	// GetSession is a console read path and intentionally hides IM-origin
+	// sessions from Viewer callers; using it inside the bot would therefore
+	// reject the very session resolveSession just created.
+	session, err := s.getSessionForIM(sessionCtx, tenantID, channelSession.SessionID)
 	if err != nil {
 		// The underlying session may have been deleted from the UI while the
 		// ChannelSession mapping still exists (GORM soft-delete does not trigger
@@ -1558,7 +1616,7 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 			if err != nil {
 				return fmt.Errorf("resolve session (retry): %w", err)
 			}
-			session, err = s.sessionService.GetSession(sessionCtx, channelSession.SessionID)
+			session, err = s.getSessionForIM(sessionCtx, tenantID, channelSession.SessionID)
 			if err != nil {
 				return fmt.Errorf("get session (retry): %w", err)
 			}
@@ -1581,7 +1639,12 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		s.sessionService.GenerateTitleAsync(sessionCtx, &sessionForTitle, msg.Content, titleModelID, nil)
 	}
 
-	s.persistIMLastRequestState(sessionCtx, session.ID, agentID, customAgent, nil)
+	// Grant the authenticated callback access to this exact IM session so the
+	// downstream history loaders can read prior turns without opening IM-origin
+	// sessions to ordinary Web-console viewers.
+	sessionCtx = types.WithChannelSessionReadAccess(sessionCtx, session.ID)
+	channelKBIDs := channelKnowledgeBaseIDs(channel)
+	s.persistIMLastRequestState(sessionCtx, session.ID, agentID, customAgent, channelKBIDs)
 
 	// 5. Enqueue the QA request into the bounded worker pool.
 	// The worker pool controls LLM concurrency and provides backpressure.
@@ -1589,16 +1652,17 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 	userKey := makeUserKey(channelID, msg.UserID, msg.ChatID, threadID)
 
 	req := &qaRequest{
-		ctx:       qaCtx,
-		cancel:    qaCancel,
-		msg:       msg,
-		session:   session,
-		agent:     customAgent,
-		adapter:   adapter,
-		channel:   channel,
-		channelID: channelID,
-		tenant:    tenant,
-		userKey:   userKey,
+		ctx:              qaCtx,
+		cancel:           qaCancel,
+		msg:              msg,
+		session:          session,
+		agent:            customAgent,
+		adapter:          adapter,
+		channel:          channel,
+		channelID:        channelID,
+		knowledgeBaseIDs: append([]string(nil), channelKBIDs...),
+		tenant:           tenant,
+		userKey:          userKey,
 	}
 
 	pos, enqueueErr := s.qaQueue.Enqueue(req)
@@ -1659,8 +1723,9 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// runQA after the assistant message is created (that's when we have the
 	// sessionID + messageID needed to poll StreamManager).
 
-	// kbIDs is left empty so the QA pipeline resolves them from the agent config.
-	var kbIDs []string
+	// A channel-level KB is an explicit retrieval boundary and takes precedence
+	// over an agent configured with KBSelectionMode=all.
+	kbIDs := append([]string(nil), req.knowledgeBaseIDs...)
 
 	// Determine output mode from channel config.
 	streamDisabled := req.channel.OutputMode == "full"
@@ -1915,7 +1980,8 @@ func imInitialSessionTitle(msg *IncomingMessage, identityTitle func(*IncomingMes
 	return identityTitle(msg)
 }
 
-// resolveUserSession finds or creates a ChannelSession keyed by (platform, user_id, chat_id, tenant_id, agent_id).
+// resolveUserSession finds or creates a ChannelSession keyed by
+// (platform, user_id, chat_id, tenant_id, agent_id, im_channel_id).
 // This is the original session resolution strategy.
 //
 // Invariant: a cache miss creates a brand-new session — we never attach a second
@@ -1924,9 +1990,7 @@ func imInitialSessionTitle(msg *IncomingMessage, identityTitle func(*IncomingMes
 // re-maps an existing session, that JOIN needs a one-row-per-session guard.
 func (s *Service) resolveUserSession(ctx context.Context, msg *IncomingMessage, tenantID uint64, agentID string, imChannelID string) (*ChannelSession, error) {
 	var cs ChannelSession
-	result := s.db.Where("platform = ? AND user_id = ? AND chat_id = ? AND tenant_id = ? AND agent_id = ? AND deleted_at IS NULL",
-		string(msg.Platform), msg.UserID, msg.ChatID, tenantID, agentID).
-		First(&cs)
+	result := userChannelSessionQuery(s.db, msg, tenantID, agentID, imChannelID).First(&cs)
 
 	if result.Error == nil {
 		return &cs, nil
@@ -1968,8 +2032,7 @@ func (s *Service) resolveUserSession(ctx context.Context, msg *IncomingMessage, 
 			logger.Warnf(ctx, "[IM] Failed to clean up orphaned session %s: %v", createdSession.ID, delErr)
 		}
 		var existing ChannelSession
-		if findErr := s.db.Where("platform = ? AND user_id = ? AND chat_id = ? AND tenant_id = ? AND agent_id = ? AND deleted_at IS NULL",
-			string(msg.Platform), msg.UserID, msg.ChatID, tenantID, agentID).
+		if findErr := userChannelSessionQuery(s.db, msg, tenantID, agentID, imChannelID).
 			First(&existing).Error; findErr != nil {
 			return nil, fmt.Errorf("create channel session: %w (lookup fallback: %v)", err, findErr)
 		}
@@ -1982,7 +2045,27 @@ func (s *Service) resolveUserSession(ctx context.Context, msg *IncomingMessage, 
 	return &cs, nil
 }
 
-// resolveThreadSession finds or creates a ChannelSession keyed by (platform, chat_id, thread_id, tenant_id, agent_id).
+func userChannelSessionQuery(
+	db *gorm.DB,
+	msg *IncomingMessage,
+	tenantID uint64,
+	agentID, imChannelID string,
+) *gorm.DB {
+	return db.Where(
+		"platform = ? AND user_id = ? AND chat_id = ? AND tenant_id = ? AND agent_id = ? AND im_channel_id = ? AND deleted_at IS NULL",
+		string(msg.Platform), msg.UserID, msg.ChatID, tenantID, agentID, imChannelID,
+	)
+}
+
+// getSessionForIM loads a session for an authenticated IM channel callback.
+// Unlike SessionService.GetSession, this path must not apply the Web console's
+// Admin+ gate for channel-managed sessions; tenant scoping is still enforced.
+func (s *Service) getSessionForIM(ctx context.Context, tenantID uint64, sessionID string) (*types.Session, error) {
+	return s.sessionService.GetSessionByID(ctx, tenantID, sessionID)
+}
+
+// resolveThreadSession finds or creates a ChannelSession keyed by
+// (platform, chat_id, thread_id, tenant_id, agent_id, im_channel_id).
 // In thread mode, each message thread gets its own session. Multiple users in the
 // same thread share the same session. Top-level messages use their own ID as
 // ThreadID, creating a new session per top-level message.
@@ -1997,10 +2080,7 @@ func (s *Service) resolveThreadSession(ctx context.Context, msg *IncomingMessage
 	}
 
 	var cs ChannelSession
-	result := s.db.Where(
-		"platform = ? AND chat_id = ? AND thread_id = ? AND tenant_id = ? AND agent_id = ? AND deleted_at IS NULL",
-		string(msg.Platform), msg.ChatID, threadID, tenantID, agentID,
-	).First(&cs)
+	result := threadChannelSessionQuery(s.db, msg, tenantID, agentID, imChannelID).First(&cs)
 
 	if result.Error == nil {
 		return &cs, nil
@@ -2042,10 +2122,8 @@ func (s *Service) resolveThreadSession(ctx context.Context, msg *IncomingMessage
 			logger.Warnf(ctx, "[IM] Failed to clean up orphaned session %s: %v", createdSession.ID, delErr)
 		}
 		var existing ChannelSession
-		if findErr := s.db.Where(
-			"platform = ? AND chat_id = ? AND thread_id = ? AND tenant_id = ? AND agent_id = ? AND deleted_at IS NULL",
-			string(msg.Platform), msg.ChatID, threadID, tenantID, agentID,
-		).First(&existing).Error; findErr != nil {
+		if findErr := threadChannelSessionQuery(s.db, msg, tenantID, agentID, imChannelID).
+			First(&existing).Error; findErr != nil {
 			return nil, fmt.Errorf("create thread session: %w (lookup fallback: %v)", err, findErr)
 		}
 		return &existing, nil
@@ -2054,6 +2132,18 @@ func (s *Service) resolveThreadSession(ctx context.Context, msg *IncomingMessage
 	logger.Infof(ctx, "[IM] Created new thread session: platform=%s thread=%s chat=%s -> session=%s",
 		msg.Platform, threadID, msg.ChatID, createdSession.ID)
 	return &cs, nil
+}
+
+func threadChannelSessionQuery(
+	db *gorm.DB,
+	msg *IncomingMessage,
+	tenantID uint64,
+	agentID, imChannelID string,
+) *gorm.DB {
+	return db.Where(
+		"platform = ? AND chat_id = ? AND thread_id = ? AND tenant_id = ? AND agent_id = ? AND im_channel_id = ? AND deleted_at IS NULL",
+		string(msg.Platform), msg.ChatID, msg.ThreadID, tenantID, agentID, imChannelID,
+	)
 }
 
 // ── Agent tool call progress formatting ──────────────────────────────

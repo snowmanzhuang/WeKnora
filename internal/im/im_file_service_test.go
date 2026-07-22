@@ -4,9 +4,13 @@ import (
 	"context"
 	"io"
 	"mime/multipart"
+	"strings"
 	"testing"
+	"time"
 
+	filesvc "github.com/Tencent/WeKnora/internal/application/service/file"
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +51,58 @@ func (s *stubIMFileService) CopyFile(context.Context, string, uint64, string) (s
 	return "", nil
 }
 
+type stubIMResourceCatalog struct {
+	resource *types.StoredResource
+}
+
+func (s *stubIMResourceCatalog) Register(context.Context, uint64, string, interfaces.ResourceRegistration) (string, error) {
+	return "", nil
+}
+func (s *stubIMResourceCatalog) Resolve(context.Context, string) (*types.StoredResource, error) {
+	return s.resource, nil
+}
+func (s *stubIMResourceCatalog) ResolvePath(_ context.Context, value string) (string, *types.StoredResource, error) {
+	if _, ok := types.ParseResourcePath(value); ok && s.resource != nil {
+		return s.resource.PhysicalPath, s.resource, nil
+	}
+	return value, nil, nil
+}
+func (s *stubIMResourceCatalog) Bind(context.Context, string, string, string, string) error {
+	return nil
+}
+func (s *stubIMResourceCatalog) MarkDeleted(context.Context, string) error { return nil }
+func (s *stubIMResourceCatalog) CreateAccessGrant(context.Context, string, time.Duration) (string, error) {
+	return "", nil
+}
+func (s *stubIMResourceCatalog) ResolveAccessGrant(context.Context, string) (*types.StoredResource, error) {
+	return s.resource, nil
+}
+
+type stubIMStorageResolver struct {
+	service   interfaces.FileService
+	backendID string
+	provider  string
+}
+
+func (s *stubIMStorageResolver) ResolveFileService(
+	_ context.Context,
+	_ *types.Tenant,
+	backendID, provider, _ string,
+) (interfaces.FileService, string, error) {
+	s.backendID = backendID
+	s.provider = provider
+	return s.service, provider, nil
+}
+
+func (s *stubIMStorageResolver) ResolveBackend(
+	context.Context,
+	*types.Tenant,
+	string,
+	string,
+) (*types.StorageBackend, error) {
+	return nil, nil
+}
+
 func TestBuildIMFileServiceForProvider_FallbackToGlobal(t *testing.T) {
 	stub := &stubIMFileService{}
 	tenant := &types.Tenant{
@@ -81,7 +137,7 @@ func TestIMFileServiceResolver_CachesPerProvider(t *testing.T) {
 			},
 		},
 	}
-	r := newIMFileServiceResolver(tenant, stub)
+	r := newIMFileServiceResolver(tenant, stub, nil, nil)
 
 	svc1 := r.resolve("minio://wizard-test/10000/a.png")
 	svc2 := r.resolve("minio://wizard-test/10000/b.png")
@@ -89,6 +145,39 @@ func TestIMFileServiceResolver_CachesPerProvider(t *testing.T) {
 
 	svc3 := r.resolve("local://10000/c.png")
 	assert.NotSame(t, svc1, svc3, "different provider should use a different service")
+}
+
+func TestIMFileServiceResolver_ResourceUsesOwningStorageBackend(t *testing.T) {
+	const (
+		resourceRef = "resource://Ynh5EUsycOSg7yoPeX6ZIQ"
+		backendID   = "a0ec0f7b-f248-48a0-b279-b42b7e017a2a"
+		localPath   = "local://10000/exports/image.jpg"
+	)
+	catalog := &stubIMResourceCatalog{resource: &types.StoredResource{
+		StorageBackendID: backendID,
+		Provider:         "local",
+		PhysicalPath:     types.BuildStorageBackendPath(backendID, localPath),
+	}}
+
+	var openedPath string
+	physicalSvc := &stubIMFileService{getFile: func(_ context.Context, filePath string) (io.ReadCloser, error) {
+		openedPath = filePath
+		return io.NopCloser(strings.NewReader("image-bytes")), nil
+	}}
+	backendSvc := filesvc.NewBackendScopedFileService(backendID, physicalSvc)
+	resourceSvc := filesvc.NewResourceCatalogFileService(backendSvc, catalog)
+	storageResolver := &stubIMStorageResolver{service: resourceSvc}
+
+	resolver := newIMFileServiceResolver(&types.Tenant{ID: 10000}, nil, storageResolver, catalog)
+	svc := resolver.resolve(resourceRef)
+	require.NotNil(t, svc)
+	reader, err := svc.GetFile(context.Background(), resourceRef)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+
+	assert.Equal(t, backendID, storageResolver.backendID)
+	assert.Equal(t, "local", storageResolver.provider)
+	assert.Equal(t, localPath, openedPath)
 }
 
 func TestRewriteStorageURLs_MinIOFallbackViaGlobal(t *testing.T) {
@@ -109,7 +198,7 @@ func TestRewriteStorageURLs_MinIOFallbackViaGlobal(t *testing.T) {
 		},
 	}
 	in := `![知识助理"知识库"管理视图界面](minio://wizard-test/10000/exports/c91cf852.png)`
-	resolver := newIMFileServiceResolver(tenant, stub)
+	resolver := newIMFileServiceResolver(tenant, stub, nil, nil)
 	out := rewriteStorageURLs(context.Background(), in, resolver)
 	assert.Contains(t, out, "https://minio.example/presigned")
 	assert.NotContains(t, out, "](minio://")
@@ -123,7 +212,7 @@ func TestRewriteStorageURLs_ScopedPath(t *testing.T) {
 		},
 	}
 	input := "![img](storage://backend-a/cos://bucket/ap-test/10000/exports/a.png)"
-	output := rewriteStorageURLs(context.Background(), input, newIMFileServiceResolver(&types.Tenant{}, stub))
+	output := rewriteStorageURLs(context.Background(), input, newIMFileServiceResolver(&types.Tenant{}, stub, nil, nil))
 	assert.Contains(t, output, "https://storage.example/a.png")
 }
 

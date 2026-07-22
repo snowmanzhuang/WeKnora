@@ -22,6 +22,7 @@
 
 export interface OwnedKnowledgeBase {
   id: string;
+  name?: string;
   is_pinned?: boolean;
   pinned_at?: string;
   created_at?: string;
@@ -32,6 +33,7 @@ export interface OwnedKnowledgeBase {
 export interface SharedKnowledgeBaseLike {
   knowledge_base: {
     id: string;
+    name?: string;
     knowledge_count?: number;
     chunk_count?: number;
     [key: string]: unknown;
@@ -77,18 +79,33 @@ function isMyKb(kb: { creator_id?: string }, currentUserId: string | undefined):
   return !!(kb.creator_id && currentUserId && kb.creator_id === currentUserId);
 }
 
-function pinnedTime(kb: OwnedKnowledgeBase): number {
-  return kb.pinned_at ? Date.parse(kb.pinned_at) : 0;
+// Numeric collation keeps numbered names intuitive: 02 sorts before 10.
+// The explicit Chinese locale also gives deterministic ordering for the
+// unnumbered Chinese names that can coexist with numbered KBs.
+const KB_NAME_COLLATOR = new Intl.Collator('zh-CN', {
+  numeric: true,
+  sensitivity: 'base',
+});
+
+export function compareKnowledgeBaseNames(
+  a: { id?: string; name?: string },
+  b: { id?: string; name?: string },
+): number {
+  const byName = KB_NAME_COLLATOR.compare(a.name || '', b.name || '');
+  if (byName !== 0) return byName;
+  return (a.id || '').localeCompare(b.id || '');
 }
 
 /**
  * Build the de-duplicated, ordered list rendered by the "All" scope.
  *
  * Ordering (unchanged from the previous inline logic):
- *   1. pinned KBs (any creator the caller pinned), newest pin first
+ *   1. pinned KBs (any creator the caller pinned)
  *   2. the caller's own non-pinned KBs
  *   3. teammate non-pinned KBs (own tenant, someone else created)
  *   4. shared KBs, editable grants before view-only
+ *
+ * Entries inside each group are naturally sorted by name.
  *
  * On top of that, every entry is unique by knowledge-base id: owned rows
  * win over shared duplicates, and repeated shares of one KB collapse to
@@ -111,7 +128,9 @@ export function mergeAllScopeKnowledgeBases(
     else if (isMyKb(kb, currentUserId)) ownMine.push(kb);
     else teammateMine.push(kb);
   }
-  pinned.sort((a, b) => pinnedTime(b) - pinnedTime(a));
+  pinned.sort(compareKnowledgeBaseNames);
+  ownMine.sort(compareKnowledgeBaseNames);
+  teammateMine.sort(compareKnowledgeBaseNames);
 
   for (const kb of pinned) result.push({ ...kb, isMine: true as const });
   for (const kb of ownMine) result.push({ ...kb, isMine: true as const });
@@ -134,7 +153,8 @@ export function mergeAllScopeKnowledgeBases(
   const sortedShared = [...dedupedShared.values()].sort((a, b) => {
     const aE = isSharedKbEditable(a.permission) ? 0 : 1;
     const bE = isSharedKbEditable(b.permission) ? 0 : 1;
-    return aE - bE;
+    if (aE !== bE) return aE - bE;
+    return compareKnowledgeBaseNames(a.knowledge_base || {}, b.knowledge_base || {});
   });
 
   for (const shared of sortedShared) {

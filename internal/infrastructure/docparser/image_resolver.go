@@ -59,6 +59,43 @@ type StoredImage struct {
 	MimeType    string
 }
 
+type stringReplacement struct {
+	start int
+	end   int
+	value string
+}
+
+// applyStringReplacements applies sorted, non-overlapping replacements in one
+// pass. Large MHTML documents can contain thousands of images; rebuilding the
+// whole markdown string once per image creates quadratic copying and enormous
+// transient heap growth.
+func applyStringReplacements(source string, replacements []stringReplacement) string {
+	if len(replacements) == 0 {
+		return source
+	}
+
+	finalSize := len(source)
+	for _, replacement := range replacements {
+		finalSize += len(replacement.value) - (replacement.end - replacement.start)
+	}
+
+	var builder strings.Builder
+	if finalSize > 0 {
+		builder.Grow(finalSize)
+	}
+	cursor := 0
+	for _, replacement := range replacements {
+		if replacement.start < cursor || replacement.end < replacement.start || replacement.end > len(source) {
+			continue
+		}
+		builder.WriteString(source[cursor:replacement.start])
+		builder.WriteString(replacement.value)
+		cursor = replacement.end
+	}
+	builder.WriteString(source[cursor:])
+	return builder.String()
+}
+
 // ImageResolver reads images from a DocReader ReadResult (inline bytes only)
 // and saves them via FileService, replacing markdown references with unified URLs.
 type ImageResolver struct {
@@ -106,9 +143,8 @@ func (r *ImageResolver) ResolveAndStore(
 
 	matches := scanMarkdownImageTargets(markdown)
 
-	// Process in reverse order to preserve positions when replacing
-	for i := len(matches) - 1; i >= 0; i-- {
-		match := matches[i]
+	replacements := make([]stringReplacement, 0, len(matches))
+	for _, match := range matches {
 		rawTarget := markdown[match.TargetStart:match.TargetEnd]
 		refPath, pathStart, pathEnd, ok := splitMarkdownImageTarget(rawTarget, refMap)
 		if !ok {
@@ -128,15 +164,23 @@ func (r *ImageResolver) ResolveAndStore(
 		}
 		images = appendStoredImage(images, stored)
 
-		// Replace in markdown
 		absolutePathStart := match.TargetStart + pathStart
 		absolutePathEnd := match.TargetStart + pathEnd
-		markdown = markdown[:absolutePathStart] + stored.ServingURL + markdown[absolutePathEnd:]
+		replacements = append(replacements, stringReplacement{
+			start: absolutePathStart,
+			end:   absolutePathEnd,
+			value: stored.ServingURL,
+		})
 	}
+	markdown = applyStringReplacements(markdown, replacements)
 
 	md5, imgRelativeHTML, _ := r.ResolveRelativeHTMLImages(ctx, markdown, fileSvc, tenantID, refMap, savedRefs)
 	markdown = md5
 	images = append(images, imgRelativeHTML...)
+
+	// Image bytes are persisted at this point and are not needed by chunking.
+	// Drop them before the large markdown enters the splitter/indexing stages.
+	result.ImageRefs = nil
 
 	return markdown, images, nil
 }
@@ -415,8 +459,8 @@ func (r *ImageResolver) ResolveRelativeHTMLImages(
 		return markdown, nil, nil
 	}
 
-	for i := len(matches) - 1; i >= 0; i-- {
-		m := matches[i]
+	replacements := make([]stringReplacement, 0, len(matches))
+	for _, m := range matches {
 		src := strings.TrimSpace(markdown[m[4]:m[5]])
 		if src == "" || strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") ||
 			isProviderScheme(src) || strings.HasPrefix(strings.ToLower(src), "data:image/") {
@@ -428,10 +472,14 @@ func (r *ImageResolver) ResolveRelativeHTMLImages(
 			continue
 		}
 		images = appendStoredImage(images, stored)
-		markdown = markdown[:m[4]] + stored.ServingURL + markdown[m[5]:]
+		replacements = append(replacements, stringReplacement{
+			start: m[4],
+			end:   m[5],
+			value: stored.ServingURL,
+		})
 	}
 
-	return markdown, images, nil
+	return applyStringReplacements(markdown, replacements), images, nil
 }
 
 // ---------------------------------------------------------------------------

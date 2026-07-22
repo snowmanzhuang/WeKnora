@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   mergeAllScopeKnowledgeBases,
+  compareKnowledgeBaseNames,
   isSharedKbEditable,
   type OwnedKnowledgeBase,
   type SharedKnowledgeBaseLike,
@@ -123,25 +124,44 @@ test('guarantees unique keys across a mixed owned + shared set', () => {
   assert.deepEqual(new Set(keys(result)), new Set(['a', 'b', 'c', 'd']))
 })
 
-test('orders pinned (newest first) → own → teammate → shared(editable first)', () => {
+test('orders pinned → own → teammate → shared(editable first), with names sorted naturally inside groups', () => {
   const result = mergeAllScopeKnowledgeBases(
     [
-      owned('mine'),
-      owned('teammate', { creator_id: 'someone-else' }),
-      owned('pin-old', { is_pinned: true, pinned_at: '2026-01-01T00:00:00Z' }),
-      owned('pin-new', { is_pinned: true, pinned_at: '2026-02-01T00:00:00Z' }),
+      owned('mine-10', { name: '10-神经眼科' }),
+      owned('mine-02', { name: '02-角膜与眼表' }),
+      owned('teammate-09', { creator_id: 'someone-else', name: '09-检查' }),
+      owned('teammate-03', { creator_id: 'someone-else', name: '03-白内障' }),
+      owned('pin-07', { name: '07-外科', is_pinned: true, pinned_at: '2026-01-01T00:00:00Z' }),
+      owned('pin-01', { name: '01-综合', is_pinned: true, pinned_at: '2026-02-01T00:00:00Z' }),
     ],
-    [shared('view-only', 'viewer'), shared('editable', 'editor')],
+    [
+      shared('view-20', 'viewer', { knowledge_base: { id: 'view-20', name: '20-视野' } }),
+      shared('edit-15', 'editor', { knowledge_base: { id: 'edit-15', name: '15-OCTA' } }),
+      shared('edit-08', 'editor', { knowledge_base: { id: 'edit-08', name: '08-炎症' } }),
+    ],
     ME,
   )
   assert.deepEqual(keys(result), [
-    'pin-new',
-    'pin-old',
-    'mine',
-    'teammate',
-    'editable',
-    'view-only',
+    'pin-01',
+    'pin-07',
+    'mine-02',
+    'mine-10',
+    'teammate-03',
+    'teammate-09',
+    'edit-08',
+    'edit-15',
+    'view-20',
   ])
+})
+
+test('name comparator uses numeric ordering instead of lexical ordering', () => {
+  const items = [
+    { id: '10', name: '10-小儿眼科' },
+    { id: '02', name: '02-角膜与眼表' },
+    { id: '01', name: '01-眼科综合' },
+  ]
+  items.sort(compareKnowledgeBaseNames)
+  assert.deepEqual(items.map((item) => item.id), ['01', '02', '10'])
 })
 
 test('drops shared rows whose knowledge_base is null', () => {

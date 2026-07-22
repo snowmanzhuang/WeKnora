@@ -201,6 +201,19 @@ func TestBuildIMLastRequestStateKeepsExplicitKBs(t *testing.T) {
 	}
 }
 
+func TestChannelKnowledgeBaseIDs(t *testing.T) {
+	if got := channelKnowledgeBaseIDs(nil); got != nil {
+		t.Fatalf("nil channel scope = %#v, want nil", got)
+	}
+	if got := channelKnowledgeBaseIDs(&IMChannel{}); got != nil {
+		t.Fatalf("empty channel scope = %#v, want nil", got)
+	}
+	got := channelKnowledgeBaseIDs(&IMChannel{KnowledgeBaseID: " kb-cataract "})
+	if !reflect.DeepEqual(got, []string{"kb-cataract"}) {
+		t.Fatalf("channel scope = %#v, want [kb-cataract]", got)
+	}
+}
+
 func TestCreateIMMessagePayloadsShareRequestShape(t *testing.T) {
 	userMsg := createIMUserMessagePayload("session-1", "hello", "request-1")
 	assistantMsg := createIMAssistantMessagePayload("session-1", "request-1")

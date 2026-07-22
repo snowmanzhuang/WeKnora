@@ -206,7 +206,7 @@ func TestRewriteStorageURLs_LocalUsesPresignedAPI(t *testing.T) {
 	}
 
 	in := "![img](local://10000/exports/abc.png)"
-	out := rewriteStorageURLs(context.Background(), in, newIMFileServiceResolver(tenant, nil))
+	out := rewriteStorageURLs(context.Background(), in, newIMFileServiceResolver(tenant, nil, nil, nil))
 	assert.Contains(t, out, "/api/v1/files/presigned")
 	assert.NotContains(t, out, "myqcloud.com")
 }
@@ -231,7 +231,7 @@ func TestRewriteStorageURLs_COSPathNotSignedAsLocalKey(t *testing.T) {
 	require.NotNil(t, svc)
 
 	in := "![img](" + path + ")"
-	out := rewriteStorageURLs(context.Background(), in, newIMFileServiceResolver(tenant, nil))
+	out := rewriteStorageURLs(context.Background(), in, newIMFileServiceResolver(tenant, nil, nil, nil))
 	if out != in {
 		assert.False(t, strings.Contains(out, "local%3A"), "COS URL must not treat local:// as object key")
 	}
@@ -485,7 +485,7 @@ func TestRewriteStorageURLs_MultipleImagesInOneChunk(t *testing.T) {
 		`![知识助理"知识库"管理视图界面](local://10000/exports/c91cf852.png)` + "\n\n### 3\n\n" +
 		"![c](local://10000/exports/a0423e91.png)\n"
 
-	out := rewriteStorageURLs(context.Background(), doc, newIMFileServiceResolver(tenant, nil))
+	out := rewriteStorageURLs(context.Background(), doc, newIMFileServiceResolver(tenant, nil, nil, nil))
 	assert.NotContains(t, out, "local://")
 	assert.Equal(t, 3, strings.Count(out, "/api/v1/files/presigned"))
 }

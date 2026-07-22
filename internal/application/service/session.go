@@ -34,11 +34,12 @@ func loadSessionForRead(
 	ownerID, sessionID string,
 ) (*types.Session, error) {
 	isAdmin := types.TenantRoleFromContext(ctx).HasPermission(types.TenantRoleAdmin)
+	hasChannelGrant := types.HasChannelSessionReadAccess(ctx, sessionID)
 
 	session, err := repo.Get(ctx, tenantID, ownerID, sessionID)
 	if err == nil {
 		imPlatform, _ := repo.GetIMPlatform(ctx, tenantID, sessionID)
-		if types.SessionRequiresAdminConsoleRead(session, imPlatform) && !isAdmin {
+		if types.SessionRequiresAdminConsoleRead(session, imPlatform) && !isAdmin && !hasChannelGrant {
 			return nil, apperrors.ErrSessionNotFound
 		}
 		if imPlatform != "" {
@@ -49,7 +50,7 @@ func loadSessionForRead(
 	if !stderrors.Is(err, apperrors.ErrSessionNotFound) {
 		return session, err
 	}
-	if !isAdmin {
+	if !isAdmin && !hasChannelGrant {
 		return nil, err
 	}
 	s, e := repo.GetByID(ctx, tenantID, sessionID)
@@ -58,6 +59,9 @@ func loadSessionForRead(
 	}
 	imPlatform, _ := repo.GetIMPlatform(ctx, tenantID, sessionID)
 	if !types.SessionRequiresAdminConsoleRead(s, imPlatform) {
+		return nil, err
+	}
+	if !isAdmin && !hasChannelGrant {
 		return nil, err
 	}
 	if imPlatform != "" {

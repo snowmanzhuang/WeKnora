@@ -285,8 +285,18 @@ func TestGetSessionDeniesViewerOnIMSession(t *testing.T) {
 	_, err := svc.GetSession(viewerCtx, imSession.ID)
 	require.ErrorIs(t, err, apperrors.ErrSessionNotFound)
 
+	wrongGrantCtx := types.WithChannelSessionReadAccess(viewerCtx, "another-session")
+	_, err = svc.GetSession(wrongGrantCtx, imSession.ID)
+	require.ErrorIs(t, err, apperrors.ErrSessionNotFound)
+
+	channelCtx := types.WithChannelSessionReadAccess(viewerCtx, imSession.ID)
+	got, err := svc.GetSession(channelCtx, imSession.ID)
+	require.NoError(t, err)
+	require.Equal(t, imSession.ID, got.ID)
+	require.Equal(t, "feishu", got.IMPlatform)
+
 	adminCtx := context.WithValue(testSessionScopeContext(1, "alice"), types.TenantRoleContextKey, types.TenantRoleAdmin)
-	got, err := svc.GetSession(adminCtx, imSession.ID)
+	got, err = svc.GetSession(adminCtx, imSession.ID)
 	require.NoError(t, err)
 	require.Equal(t, imSession.ID, got.ID)
 	require.Equal(t, "feishu", got.IMPlatform)

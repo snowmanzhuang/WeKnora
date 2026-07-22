@@ -58,7 +58,7 @@ func newIMDisplayPreparer(
 	incoming *IncomingMessage,
 	tenant *types.Tenant,
 ) *imDisplayPreparer {
-	resolver := newIMFileServiceResolver(tenant, service.defaultFileSvc, service.storageResolver)
+	resolver := newIMFileServiceResolver(tenant, service.defaultFileSvc, service.storageResolver, service.resourceCatalog)
 	preparer := &imDisplayPreparer{
 		service:        service,
 		tenant:         tenant,
@@ -113,7 +113,7 @@ func (s *Service) prepareIMDisplayContent(
 		service:        s,
 		tenant:         tenant,
 		separateImages: includeImages,
-		resolver:       newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver),
+		resolver:       newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver, s.resourceCatalog),
 	}
 	return preparer.prepare(ctx, display, true)
 }
@@ -264,7 +264,7 @@ func (s *Service) extractIMOutboundImages(
 	content string,
 	tenant *types.Tenant,
 ) (string, []*OutboundImage) {
-	resolver := newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver)
+	resolver := newIMFileServiceResolver(tenant, s.defaultFileSvc, s.storageResolver, s.resourceCatalog)
 	resolver.ctx = ctx
 	return extractIMOutboundImages(ctx, content, resolver)
 }

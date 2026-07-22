@@ -135,6 +135,7 @@ def _build_default_registry() -> ParserEngineRegistry:
             "xls": ExcelParser,
             "epub": EPUBParser,
             "mhtml": MHTMLParser,
+            "mht": MHTMLParser,
             **_image_types,
         },
         description="内置解析引擎",

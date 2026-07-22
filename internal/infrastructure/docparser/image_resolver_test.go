@@ -113,6 +113,42 @@ func (c *captureSaveBytes) CopyFile(context.Context, string, uint64, string) (st
 
 var _ interfaces.FileService = (*captureSaveBytes)(nil)
 
+func TestApplyStringReplacementsSinglePass(t *testing.T) {
+	source := "0123456789"
+	got := applyStringReplacements(source, []stringReplacement{
+		{start: 1, end: 3, value: "A"},
+		{start: 5, end: 8, value: "BC"},
+	})
+	if got != "0A34BC89" {
+		t.Fatalf("unexpected replacement result: %q", got)
+	}
+}
+
+func BenchmarkApplyStringReplacementsLargeMHTML(b *testing.B) {
+	const documentSize = 20 << 20
+	const imageCount = 3907
+	source := strings.Repeat("x", documentSize)
+	replacements := make([]stringReplacement, 0, imageCount)
+	for i := 0; i < imageCount; i++ {
+		start := (i + 1) * documentSize / (imageCount + 1)
+		replacements = append(replacements, stringReplacement{
+			start: start,
+			end:   start + 1,
+			value: "local://test/image.png",
+		})
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(documentSize)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := applyStringReplacements(source, replacements)
+		if len(result) <= len(source) {
+			b.Fatal("expected replacements to grow the output")
+		}
+	}
+}
+
 func TestResolveDataURIImages(t *testing.T) {
 	png := createTestPNG(200, 150)
 	b64 := base64.StdEncoding.EncodeToString(png)
@@ -483,6 +519,9 @@ func TestResolveAndStoreDuplicateReferencesStoreOnce(t *testing.T) {
 	}
 	if strings.Count(out, "local://test/") != 2 {
 		t.Fatalf("expected both markdown references to be replaced: %s", out)
+	}
+	if result.ImageRefs != nil {
+		t.Fatalf("expected persisted image bytes to be released")
 	}
 	if !strings.Contains(out, `"第一处"`) || !strings.Contains(out, `"第二处"`) {
 		t.Fatalf("duplicate reference titles were not preserved: %s", out)

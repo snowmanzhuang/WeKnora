@@ -235,7 +235,7 @@ func (p *AttachmentProcessor) processWithDocumentReader(
 	if p.documentReader == nil {
 		return fmt.Errorf("DocumentReader not configured")
 	}
-	
+
 	normalizedType := strings.TrimPrefix(fileType, ".")
 
 	result, err := p.documentReader.Read(ctx, &types.ReadRequest{
@@ -288,7 +288,7 @@ func isValidFileType(fileName string) bool {
 
 	supportedTypes := []string{
 		// documents
-		"docx", "doc", "pdf", "ppt", "pptx", "epub", "mhtml",
+		"docx", "doc", "pdf", "ppt", "pptx", "epub", "mhtml", "mht",
 		// spreadsheets
 		"xlsx", "xls",
 		// text / markup

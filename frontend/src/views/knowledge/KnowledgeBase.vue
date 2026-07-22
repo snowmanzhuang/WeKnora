@@ -195,9 +195,12 @@ const supportedFileTypes = computed<Set<string>>(() => {
   return available
 })
 
-const acceptFileTypes = computed(() =>
-  [...supportedFileTypes.value].map(t => '.' + t).join(',')
-)
+const acceptFileTypes = computed(() => {
+  const types = new Set(supportedFileTypes.value)
+  // Windows 8.3 short names may expose an .mhtml archive as .MHT.
+  if (types.has('mhtml')) types.add('mht')
+  return [...types].map(t => '.' + t).join(',')
+})
 
 const unsupportedFileTypes = computed<string[]>(() => {
   const engines = parserEngines.value
@@ -515,6 +518,7 @@ const fileTypeOptions = computed(() => [
   { label: 'PPT', value: 'ppt' },
   { label: 'EPUB', value: 'epub' },
   { label: 'MHTML', value: 'mhtml' },
+  { label: 'MHT', value: 'mht' },
   { label: 'TXT', value: 'txt' },
   { label: 'MD', value: 'md' },
   { label: 'URL', value: 'url' },
