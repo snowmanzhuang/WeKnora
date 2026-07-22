@@ -40,7 +40,93 @@ var _ im.StreamSender = (*Adapter)(nil)
 var _ im.FileDownloader = (*Adapter)(nil)
 var _ im.InlineImageUploader = (*Adapter)(nil)
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+const (
+	feishuRequestBudget      = 30 * time.Second
+	feishuRequestMaxAttempts = 3
+)
+
+var (
+	httpClient           = &http.Client{Timeout: feishuRequestBudget}
+	feishuRetryBaseDelay = 250 * time.Millisecond
+)
+
+// doFeishuRequest retries transient Open Platform failures without allowing a
+// single operation to run indefinitely. All attempts share one 30-second
+// budget; client errors are returned immediately, while transport failures,
+// HTTP 408/429 and 5xx responses are retried up to three times.
+func doFeishuRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, feishuRequestBudget)
+
+	var lastErr error
+	for attempt := 1; attempt <= feishuRequestMaxAttempts; attempt++ {
+		attemptReq := req.Clone(requestCtx)
+		if req.Body != nil {
+			if req.GetBody == nil {
+				if attempt > 1 {
+					cancel()
+					return nil, lastErr
+				}
+				attemptReq.Body = req.Body
+			} else {
+				body, err := req.GetBody()
+				if err != nil {
+					cancel()
+					return nil, fmt.Errorf("recreate request body: %w", err)
+				}
+				attemptReq.Body = body
+			}
+		}
+
+		resp, err := httpClient.Do(attemptReq)
+		if err == nil && !isRetryableFeishuStatus(resp.StatusCode) {
+			resp.Body = &cancelOnCloseReadCloser{ReadCloser: resp.Body, cancel: cancel}
+			return resp, nil
+		}
+
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("temporary Feishu HTTP status %d", resp.StatusCode)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
+
+		if attempt == feishuRequestMaxAttempts || requestCtx.Err() != nil {
+			break
+		}
+		delay := feishuRetryBaseDelay * time.Duration(1<<(attempt-1))
+		timer := time.NewTimer(delay)
+		select {
+		case <-requestCtx.Done():
+			timer.Stop()
+			cancel()
+			return nil, requestCtx.Err()
+		case <-timer.C:
+		}
+	}
+
+	if requestCtx.Err() != nil {
+		cancel()
+		return nil, requestCtx.Err()
+	}
+	cancel()
+	return nil, lastErr
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
+}
+
+func isRetryableFeishuStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
 
 // Adapter implements im.Adapter for Feishu/Lark.
 type Adapter struct {
@@ -465,7 +551,8 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	replyContent := a.resolveMarkdownImages(ctx, accessToken, reply.Content)
-	if feishuInlineImageRe.MatchString(replyContent) {
+	replyContent = normalizeFeishuImageCaptionSpacing(replyContent)
+	if shouldUseFeishuStaticCard(replyContent) {
 		cardID, cardErr := a.cardkitCreate(ctx, accessToken, buildStaticCardJSON(replyContent))
 		if cardErr == nil {
 			cardErr = a.sendCardByCardID(ctx, accessToken, incoming, cardID)
@@ -473,8 +560,10 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 		if cardErr == nil {
 			return nil
 		}
-		logger.Warnf(ctx, "[Feishu] Static image card failed, degrading to text: %v", cardErr)
-		replyContent = degradeFeishuInlineImages(replyContent)
+		logger.Warnf(ctx, "[%s] Static Markdown card failed, degrading to readable text: %v", a.region.Label, cardErr)
+		replyContent = feishuMarkdownToPlainText(replyContent)
+	} else {
+		replyContent = strings.ReplaceAll(replyContent, "*图片暂时无法显示*", "图片暂时无法显示")
 	}
 
 	// Build text message content
@@ -589,7 +678,7 @@ func (a *Adapter) postFeishuMessage(ctx context.Context, accessToken, url string
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return 0, "", fmt.Errorf("send request: %w", err)
 	}
@@ -653,7 +742,7 @@ func (a *Adapter) DownloadFile(ctx context.Context, msg *im.IncomingMessage) (io
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return nil, "", fmt.Errorf("download file: %w", err)
 	}
@@ -780,6 +869,37 @@ func buildStaticCardJSON(content string) string {
 	return string(b)
 }
 
+var (
+	feishuRichMarkdownRe = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:#{1,6}\s+|[-+*]\s+|\d+[.)]\s+|>\s+|` + "```" + `)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\[[^\]\n]+\]\([^)]+\)`)
+	feishuHeadingRe      = regexp.MustCompile(`(?m)^\s*#{1,6}\s+`)
+	feishuFenceRe        = regexp.MustCompile("(?m)^\\s*```[^\\n]*$")
+	feishuStarBulletRe   = regexp.MustCompile(`(?m)^\s*[*+]\s+`)
+	feishuQuoteRe        = regexp.MustCompile(`(?m)^\s*>\s?`)
+	feishuMarkdownLinkRe = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	feishuExtraBlankRe   = regexp.MustCompile(`\n{3,}`)
+)
+
+func shouldUseFeishuStaticCard(content string) bool {
+	return feishuInlineImageRe.MatchString(content) || feishuRichMarkdownRe.MatchString(content)
+}
+
+// feishuMarkdownToPlainText is the final fallback when CardKit is unavailable.
+// It keeps the answer readable in a text message instead of exposing raw
+// headings/emphasis markers. This path is Feishu/Lark-only and does not affect
+// the web answer renderer.
+func feishuMarkdownToPlainText(content string) string {
+	content = degradeFeishuInlineImages(content)
+	content = feishuFenceRe.ReplaceAllString(content, "")
+	content = feishuHeadingRe.ReplaceAllString(content, "")
+	content = feishuStarBulletRe.ReplaceAllString(content, "- ")
+	content = feishuQuoteRe.ReplaceAllString(content, "")
+	content = feishuMarkdownLinkRe.ReplaceAllString(content, "$1 ($2)")
+	content = strings.ReplaceAll(content, "*图片暂时无法显示*", "图片暂时无法显示")
+	content = strings.NewReplacer("**", "", "__", "", "~~", "").Replace(content)
+	content = feishuExtraBlankRe.ReplaceAllString(content, "\n\n")
+	return strings.TrimSpace(content)
+}
+
 // StartStream creates a CardKit card entity, sends it as a message, and returns the card_id.
 func (a *Adapter) StartStream(ctx context.Context, incoming *im.IncomingMessage) (string, error) {
 	accessToken, err := a.getTenantAccessToken(ctx)
@@ -839,6 +959,7 @@ func (a *Adapter) UpdateStreamContent(ctx context.Context, incoming *im.Incoming
 	// not an external HTTP/COS URL. Convert markdown image URLs to image_keys
 	// (uploading on demand) so the card update does not fail with 200570.
 	content := a.resolveMarkdownImages(ctx, accessToken, fullContent)
+	content = normalizeFeishuImageCaptionSpacing(content)
 
 	return a.cardkitUpdateElement(ctx, accessToken, streamID, streamingElementID, content, seq)
 }
@@ -857,25 +978,32 @@ func (a *Adapter) SendStreamChunk(ctx context.Context, incoming *im.IncomingMess
 func (a *Adapter) EndStream(ctx context.Context, incoming *im.IncomingMessage, streamID string) error {
 	feishuStreamsMu.Lock()
 	state, ok := feishuStreams[streamID]
-	delete(feishuStreams, streamID)
 	feishuStreamsMu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown stream ID: %s", streamID)
+	}
 
 	accessToken, err := a.getTenantAccessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
 	}
 
-	var seq int
-	if ok {
-		state.mu.Lock()
-		seq = state.nextSeq()
-		state.mu.Unlock()
+	state.mu.Lock()
+	seq := state.nextSeq()
+	state.mu.Unlock()
+
+	// Turn off streaming_mode and replace the permanent "thinking" summary
+	// with a completed state. Updating only the body element leaves the card
+	// summary unchanged, so Feishu otherwise keeps showing "正在思考..." even
+	// after the final answer is visible.
+	if err := a.cardkitSetStreaming(ctx, accessToken, streamID, false, a.region.CompletedText, seq); err != nil {
+		logger.Warnf(ctx, "[%s] Failed to disable streaming_mode: %v", a.region.Label, err)
+		return fmt.Errorf("disable streaming mode: %w", err)
 	}
 
-	// Turn off streaming_mode to remove loading indicator
-	if err := a.cardkitSetStreaming(ctx, accessToken, streamID, false, seq); err != nil {
-		logger.Warnf(ctx, "[%s] Failed to disable streaming_mode: %v", a.region.Label, err)
-	}
+	feishuStreamsMu.Lock()
+	delete(feishuStreams, streamID)
+	feishuStreamsMu.Unlock()
 
 	logger.Infof(ctx, "[%s] Streaming ended: card_id=%s", a.region.Label, streamID)
 	return nil
@@ -899,7 +1027,7 @@ func (a *Adapter) cardkitCreate(ctx context.Context, accessToken, cardJSON strin
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -977,7 +1105,7 @@ func (a *Adapter) cardkitUpdateElement(ctx context.Context, accessToken, cardID,
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -1012,6 +1140,61 @@ var feishuMarkdownImageRe = regexp.MustCompile(`!\[([^\]]*)\]\((https?://[^)\s]+
 // feishuInlineImageRe recognizes image references returned by Feishu's image
 // upload API. Card markdown accepts these keys but normal text messages do not.
 var feishuInlineImageRe = regexp.MustCompile(`!\[([^\]]*)\]\((img_[^)\s]+)\)`)
+
+var (
+	// Match a complete Feishu image on its own line. The greedy same-line alt
+	// match tolerates caption text containing square brackets.
+	feishuBlockImageLineRe = regexp.MustCompile(`^[ \t]*!\[[^\n]*\]\(img_[^)\s]+\)[ \t]*\r?$`)
+	// Do not pull structural content up against an image. Only ordinary prose is
+	// treated as a likely caption/explanation line.
+	feishuNonCaptionLineRe = regexp.MustCompile(`(?i)^(?:#{1,6}(?:\s|$)|[-+*](?:\s|$)|>(?:\s|$)|\d+[.)](?:\s|$)|` + "```" + `|~~~|\||!\[|<(?:hr|table|div)\b|(?:-{3,}|_{3,}|\*{3,})\s*$)`)
+)
+
+// normalizeFeishuImageCaptionSpacing converts:
+//
+//	![image](img_key)\n\ncaption
+//
+// into a single line break between the image and caption. Feishu's CardKit
+// treats two line breaks as a hard break and displays a conspicuous empty row;
+// one line break is sufficient because the image itself is a block element.
+// This function is called only by the Feishu/Lark adapter, so stored answers,
+// web rendering, and other IM platforms remain unchanged.
+func normalizeFeishuImageCaptionSpacing(content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) < 3 {
+		return content
+	}
+
+	result := make([]string, 0, len(lines))
+	changed := false
+	for i := 0; i < len(lines); i++ {
+		result = append(result, lines[i])
+		if !feishuBlockImageLineRe.MatchString(lines[i]) {
+			continue
+		}
+
+		next := i + 1
+		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+			next++
+		}
+		if next == i+1 || next >= len(lines) {
+			continue
+		}
+		nextLine := strings.TrimSpace(lines[next])
+		if feishuNonCaptionLineRe.MatchString(nextLine) {
+			continue
+		}
+
+		// Skip only the blank lines. The caption itself is handled by the next
+		// loop iteration, which also lets a later image be normalized normally.
+		i = next - 1
+		changed = true
+	}
+	if !changed {
+		return content
+	}
+	return strings.Join(result, "\n")
+}
 
 // feishuMaxImageBytes caps the download size of an image before uploading to
 // Feishu (Feishu's limit is 10MB; keep a small margin).
@@ -1207,7 +1390,7 @@ func (a *Adapter) uploadImageBytes(
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("upload image: %w", err)
 	}
@@ -1233,22 +1416,24 @@ func (a *Adapter) uploadImageBytes(
 }
 
 func degradeFeishuInlineImages(content string) string {
-	return feishuInlineImageRe.ReplaceAllStringFunc(content, func(match string) string {
-		sub := feishuInlineImageRe.FindStringSubmatch(match)
-		label := strings.TrimSpace(sub[1])
-		if label == "" {
-			label = "图片"
-		}
-		return fmt.Sprintf("[图片：%s]", label)
-	})
+	return feishuInlineImageRe.ReplaceAllString(content, "[图片暂时无法显示]")
 }
 
 // cardkitSetStreaming updates the card's streaming_mode setting.
 // PATCH /open-apis/cardkit/v1/cards/:card_id/settings
-func (a *Adapter) cardkitSetStreaming(ctx context.Context, accessToken, cardID string, streaming bool, sequence int) error {
-	settings, _ := json.Marshal(map[string]interface{}{
+func (a *Adapter) cardkitSetStreaming(ctx context.Context, accessToken, cardID string, streaming bool, summary string, sequence int) error {
+	config := map[string]interface{}{
 		"streaming_mode": streaming,
-	})
+	}
+	if summary != "" {
+		config["summary"] = map[string]string{"content": summary}
+	}
+	// CardKit expects the settings string to contain the card-level settings
+	// object, whose configurable fields live under "config". A flat
+	// {"streaming_mode": false, ...} payload is accepted with code=0 but its
+	// fields are silently ignored by Feishu.
+	cardSettings := map[string]interface{}{"config": config}
+	settings, _ := json.Marshal(cardSettings)
 	payload, _ := json.Marshal(map[string]interface{}{
 		"settings": string(settings),
 		"sequence": sequence,
@@ -1262,7 +1447,7 @@ func (a *Adapter) cardkitSetStreaming(ctx context.Context, accessToken, cardID s
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -1304,7 +1489,7 @@ func (a *Adapter) getTenantAccessToken(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 
-	resp, err := httpClient.Do(req)
+	resp, err := doFeishuRequest(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("request token: %w", err)
 	}

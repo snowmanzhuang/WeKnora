@@ -22,6 +22,9 @@ type Region struct {
 	// ThinkingText is the placeholder shown in a streaming card before the
 	// first answer chunk arrives.
 	ThinkingText string
+	// CompletedText replaces ThinkingText in the card summary after the
+	// streaming reply has finished.
+	CompletedText string
 	// ImageFallbackLabel labels the plain link an image degrades to when it
 	// cannot be uploaded to the platform.
 	ImageFallbackLabel string
@@ -35,6 +38,7 @@ var (
 		OpenBaseURL:        feishuOpenBaseURL,
 		Label:              "Feishu",
 		ThinkingText:       "正在思考...",
+		CompletedText:      "回答完成",
 		ImageFallbackLabel: "图片",
 	}
 
@@ -44,6 +48,7 @@ var (
 		OpenBaseURL:        larkOpenBaseURL,
 		Label:              "Lark",
 		ThinkingText:       "Thinking...",
+		CompletedText:      "Response complete",
 		ImageFallbackLabel: "Image",
 	}
 )

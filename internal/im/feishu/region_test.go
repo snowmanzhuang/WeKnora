@@ -125,4 +125,10 @@ func TestBuildStreamingCardJSON_PlaceholderFollowsRegion(t *testing.T) {
 	if RegionFeishu.ThinkingText == RegionLark.ThinkingText {
 		t.Error("Feishu and Lark share ThinkingText; Lark users would see Chinese copy")
 	}
+	if RegionFeishu.CompletedText == "" || RegionLark.CompletedText == "" {
+		t.Error("streaming completion summary must not be empty")
+	}
+	if RegionFeishu.CompletedText == RegionLark.CompletedText {
+		t.Error("Feishu and Lark share CompletedText; Lark users would see Chinese copy")
+	}
 }

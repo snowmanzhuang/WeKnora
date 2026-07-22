@@ -47,16 +47,6 @@ const (
 	agentCompleteWaitTimeout = 10 * time.Second
 )
 
-// imCitationTagRe matches inline citation tags produced by the agent pipeline.
-// These tags are rendered as interactive UI in the web frontend but are meaningless
-// in IM platforms, so they must be stripped before sending.
-var imCitationTagRe = regexp.MustCompile(`<(?:kb|web)\b[^>]*/?>`)
-
-// stripIMCitationTags removes <kb .../> and <web .../> inline citation tags from s.
-func stripIMCitationTags(s string) string {
-	return imCitationTagRe.ReplaceAllString(s, "")
-}
-
 // imageXMLBlockRe matches <image ...>...</image> blocks produced by
 // EnrichContentWithImageInfo in the RAG context pipeline. These blocks contain
 // metadata for the LLM and must be stripped before sending to IM platforms.
@@ -208,11 +198,11 @@ func formatIMOutboundAnswer(ctx context.Context, raw string, tenant *types.Tenan
 
 // cleanIMContent applies all IM-specific content transformations:
 //  1. Collapse <image> XML blocks back to plain markdown
-//  2. Strip <kb/> and <web/> citation tags
+//  2. Convert <kb/> citations to numbered book sources and strip <web/> tags
 //  3. Rewrite provider:// URLs to HTTP URLs (scheme-aware per tenant config)
 func cleanIMContent(ctx context.Context, content string, tenant *types.Tenant, defaultFileSvc interfaces.FileService, storageResolvers ...interfaces.StorageBackendResolver) string {
 	content = stripImageXMLTags(content)
-	content = stripIMCitationTags(content)
+	content = formatIMCitationTags(content)
 	var storageResolver interfaces.StorageBackendResolver
 	if len(storageResolvers) > 0 {
 		storageResolver = storageResolvers[0]
@@ -376,7 +366,7 @@ const (
 // scattered string literals across multiple files.
 const (
 	RedisKeyLeader     = "im:ws:leader:"    // + channelID — WebSocket leader election
-	RedisKeyDedup      = "im:dedup:"        // + messageID — message deduplication
+	RedisKeyDedup      = "im:dedup:"        // + channelID + ":" + messageID — message deduplication
 	RedisKeyStop       = "im:stop:"         // + userKey   — cross-instance /stop marker (pre-execution)
 	RedisKeyInflight   = "im:inflight:"     // + userKey   — maps userKey → sessionID:messageID for cross-instance /stop
 	RedisKeyQueueUser  = "im:queue:user:"   // + userKey   — global per-user queue counter
@@ -454,7 +444,7 @@ type Service struct {
 	// adapterFactories maps platform name -> factory function
 	adapterFactories map[string]AdapterFactory
 
-	// processedMsgs tracks recently processed message IDs to prevent duplicate handling.
+	// processedMsgs tracks recently processed channel/message pairs to prevent duplicate handling.
 	processedMsgs sync.Map
 
 	// rateLimiter enforces per-user sliding window rate limiting.
@@ -1441,7 +1431,7 @@ func (s *Service) GetChannelByIDAndTenant(channelID string, tenantID uint64) (*I
 	return &ch, nil
 }
 
-// isDuplicate checks if a message has already been processed.
+// isDuplicate checks if a message has already been processed by this channel.
 //
 // Multi-instance mode (Redis available): uses Redis SetNX for cross-instance
 // deduplication. If Redis fails, returns true (fail-closed) to prevent
@@ -1450,9 +1440,10 @@ func (s *Service) GetChannelByIDAndTenant(channelID string, tenantID uint64) (*I
 //
 // Single-instance mode (no Redis): uses a local sync.Map, which is sufficient
 // when only one instance receives messages.
-func (s *Service) isDuplicate(ctx context.Context, messageID string) bool {
+func (s *Service) isDuplicate(ctx context.Context, channelID, messageID string) bool {
+	dedupID := channelID + ":" + messageID
 	if s.redis != nil {
-		key := RedisKeyDedup + messageID
+		key := RedisKeyDedup + dedupID
 		ok, err := s.redis.SetNX(ctx, key, "1", dedupTTL).Result()
 		if err == nil {
 			return !ok // SetNX returns true when key was newly set (not a duplicate)
@@ -1463,7 +1454,7 @@ func (s *Service) isDuplicate(ctx context.Context, messageID string) bool {
 		return true
 	}
 	// Single-instance mode: local dedup is sufficient.
-	_, loaded := s.processedMsgs.LoadOrStore(messageID, time.Now())
+	_, loaded := s.processedMsgs.LoadOrStore(dedupID, time.Now())
 	return loaded
 }
 
@@ -1471,8 +1462,8 @@ func (s *Service) isDuplicate(ctx context.Context, messageID string) bool {
 func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, channelID string) error {
 	// Dedup: skip if this message was already processed (IM platforms may retry)
 	if msg.MessageID != "" {
-		if s.isDuplicate(ctx, msg.MessageID) {
-			logger.Infof(ctx, "[IM] Skipping duplicate message: %s", msg.MessageID)
+		if s.isDuplicate(ctx, channelID, msg.MessageID) {
+			logger.Infof(ctx, "[IM] Skipping duplicate message for channel %s: %s", channelID, msg.MessageID)
 			return nil
 		}
 	}

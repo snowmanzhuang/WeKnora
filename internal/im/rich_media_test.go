@@ -209,7 +209,7 @@ func TestInlineImageRewriter_UploadFailureDegradesOnlyImage(t *testing.T) {
 
 	output := rewriter.rewrite(context.Background(), "前文 ![眼底图](local://10000/exports/a.png) 后文", false)
 
-	assert.Equal(t, "前文 *图片暂时无法显示：眼底图* 后文", output)
+	assert.Equal(t, "前文 *图片暂时无法显示* 后文", output)
 	assert.NotContains(t, output, "local://")
 	assert.Equal(t, 1, uploader.uploadCount("a.png"))
 }

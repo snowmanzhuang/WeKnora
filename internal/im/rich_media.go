@@ -95,7 +95,11 @@ func (p *imDisplayPreparer) prepare(
 		content, images = extractIMOutboundImages(ctx, content, p.resolver)
 	}
 
-	content = stripIMCitationTags(content)
+	if final {
+		content = formatIMCitationTags(content)
+	} else {
+		content = stripIMCitationTags(content)
+	}
 	if p.inlineImages != nil {
 		content = p.inlineImages.rewrite(ctx, content, final)
 	}
@@ -161,11 +165,7 @@ func (r *imInlineImageRewriter) rewrite(ctx context.Context, content string, fin
 		if ref := r.refs[span.Path]; ref != "" {
 			return fmt.Sprintf("![%s](%s)", span.Alt, ref), true
 		}
-		label := strings.TrimSpace(span.Alt)
-		if label == "" {
-			label = "图片"
-		}
-		return fmt.Sprintf("*图片暂时无法显示：%s*", label), true
+		return "*图片暂时无法显示*", true
 	})
 }
 
