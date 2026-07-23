@@ -463,43 +463,19 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			ThreadID:    threadID,
 			FileKey:     imageContent.ImageKey,
 			FileName:    imageContent.ImageKey + ".png",
+			Images: []im.IncomingImage{{
+				FileKey:  imageContent.ImageKey,
+				FileName: imageContent.ImageKey + ".png",
+			}},
 		}, nil
 
 	case "post":
-		// Rich text: extract plain text for QA
-		var postContent struct {
-			Title   string              `json:"title"`
-			Content [][]json.RawMessage `json:"content"`
+		// Rich text may contain both text and inline images. Preserve both so
+		// the IM service can run the same multimodal QA path as the web client.
+		content, images, err := parsePostMessageContent(msg.Content)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal([]byte(msg.Content), &postContent); err != nil {
-			return nil, fmt.Errorf("unmarshal post content: %w", err)
-		}
-
-		var textParts []string
-		if postContent.Title != "" {
-			textParts = append(textParts, postContent.Title)
-		}
-		for _, line := range postContent.Content {
-			var lineText strings.Builder
-			for _, elem := range line {
-				var tag struct {
-					Tag  string `json:"tag"`
-					Text string `json:"text"`
-				}
-				if err := json.Unmarshal(elem, &tag); err != nil {
-					continue
-				}
-				switch tag.Tag {
-				case "text", "a":
-					lineText.WriteString(tag.Text)
-				}
-			}
-			if t := strings.TrimSpace(lineText.String()); t != "" {
-				textParts = append(textParts, t)
-			}
-		}
-
-		content := strings.Join(textParts, "\n")
 		if chatType == im.ChatTypeGroup {
 			for strings.HasPrefix(content, "@_user_") {
 				idx := strings.Index(content, " ")
@@ -511,7 +487,7 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			}
 		}
 		content = strings.TrimSpace(content)
-		if content == "" {
+		if content == "" && len(images) == 0 {
 			return nil, nil
 		}
 
@@ -524,12 +500,64 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			Content:     content,
 			MessageID:   msg.MessageID,
 			ThreadID:    threadID,
+			Images:      images,
 		}, nil
 
 	default:
 		logger.Infof(c.Request.Context(), "[%s] Ignoring unsupported message type: %s", a.region.Label, msg.MessageType)
 		return nil, nil
 	}
+}
+
+func parsePostMessageContent(raw string) (string, []im.IncomingImage, error) {
+	var postContent struct {
+		Title   string              `json:"title"`
+		Content [][]json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &postContent); err != nil {
+		return "", nil, fmt.Errorf("unmarshal post content: %w", err)
+	}
+
+	var textParts []string
+	if title := strings.TrimSpace(postContent.Title); title != "" {
+		textParts = append(textParts, title)
+	}
+	images := make([]im.IncomingImage, 0)
+	seenImageKeys := make(map[string]struct{})
+	for _, line := range postContent.Content {
+		var lineText strings.Builder
+		for _, elem := range line {
+			var tag struct {
+				Tag      string `json:"tag"`
+				Text     string `json:"text"`
+				ImageKey string `json:"image_key"`
+			}
+			if err := json.Unmarshal(elem, &tag); err != nil {
+				continue
+			}
+			switch tag.Tag {
+			case "text", "a":
+				lineText.WriteString(tag.Text)
+			case "img":
+				imageKey := strings.TrimSpace(tag.ImageKey)
+				if imageKey == "" {
+					continue
+				}
+				if _, exists := seenImageKeys[imageKey]; exists {
+					continue
+				}
+				seenImageKeys[imageKey] = struct{}{}
+				images = append(images, im.IncomingImage{
+					FileKey:  imageKey,
+					FileName: imageKey + ".png",
+				})
+			}
+		}
+		if text := strings.TrimSpace(lineText.String()); text != "" {
+			textParts = append(textParts, text)
+		}
+	}
+	return strings.Join(textParts, "\n"), images, nil
 }
 
 // SendReply sends a reply message via Feishu API.

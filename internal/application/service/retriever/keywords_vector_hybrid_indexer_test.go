@@ -2,6 +2,7 @@ package retriever
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -104,6 +105,32 @@ func TestBatchIndexTruncatesOversizedEmbeddingInput(t *testing.T) {
 	}
 	if got := len([]rune(embedder.batchTexts[0])); got > safetyMaxChars {
 		t.Fatalf("embedding input length = %d, want <= %d", got, safetyMaxChars)
+	}
+}
+
+type exhaustedRetryEmbedder struct {
+	embedding.Embedder
+	calls int
+}
+
+func (e *exhaustedRetryEmbedder) BatchEmbedWithPool(
+	context.Context,
+	embedding.Embedder,
+	[]string,
+) ([][]float32, error) {
+	e.calls++
+	return nil, embedding.ErrEmbeddingSubBatchRetriesExhausted
+}
+
+func TestBatchEmbedWithBackoffDoesNotRetryWholeDocumentAfterLocalRetries(t *testing.T) {
+	embedder := &exhaustedRetryEmbedder{}
+
+	_, err := batchEmbedWithBackoff(context.Background(), embedder, []string{"one", "two"})
+	if !errors.Is(err, embedding.ErrEmbeddingSubBatchRetriesExhausted) {
+		t.Fatalf("batchEmbedWithBackoff error = %v, want exhausted local retry error", err)
+	}
+	if embedder.calls != 1 {
+		t.Fatalf("whole-document attempts = %d, want 1 after local retries are exhausted", embedder.calls)
 	}
 }
 

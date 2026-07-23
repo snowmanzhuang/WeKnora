@@ -3,10 +3,12 @@ package im
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/textproto"
 	"os"
 	"regexp"
@@ -45,6 +47,10 @@ const (
 	// agentCompleteWaitTimeout bounds how long IM waits for EventAgentComplete after
 	// the final answer stream finishes, preventing indefinite hangs.
 	agentCompleteWaitTimeout = 10 * time.Second
+	// maxIMImageSize mirrors the web image-upload limit.
+	maxIMImageSize = 10 << 20
+	// maxIMImagesCount mirrors the web image-count limit.
+	maxIMImagesCount = 5
 )
 
 // imageXMLBlockRe matches <image ...>...</image> blocks produced by
@@ -643,6 +649,7 @@ func buildIMQARequest(
 	customAgent *types.CustomAgent,
 	kbIDs []string,
 	quote *QuotedMessage,
+	imageURLs []string,
 ) *types.QARequest {
 	// WebSearchEnabled: the web handler passes this per-request from the
 	// frontend toggle; for IM channels the user has no per-message toggle,
@@ -658,6 +665,7 @@ func buildIMQARequest(
 		UserMessageID:      userMessageID,
 		WebSearchEnabled:   webSearchEnabled,
 		QuotedContext:      quotedContext,
+		ImageURLs:          imageURLs,
 	}
 }
 
@@ -692,7 +700,7 @@ func channelKnowledgeBaseIDs(channel *IMChannel) []string {
 	return []string{kbID}
 }
 
-func createIMUserMessagePayload(sessionID, content, requestID string) *types.Message {
+func createIMUserMessagePayload(sessionID, content, requestID string, images types.MessageImages) *types.Message {
 	return &types.Message{
 		SessionID:   sessionID,
 		Role:        "user",
@@ -701,7 +709,168 @@ func createIMUserMessagePayload(sessionID, content, requestID string) *types.Mes
 		CreatedAt:   time.Now(),
 		IsCompleted: true,
 		Channel:     "im",
+		Images:      images,
 	}
+}
+
+func incomingImages(msg *IncomingMessage) []IncomingImage {
+	if msg == nil {
+		return nil
+	}
+	if len(msg.Images) > 0 {
+		return msg.Images
+	}
+	if msg.MessageType == MessageTypeImage && strings.TrimSpace(msg.FileKey) != "" {
+		fileName := strings.TrimSpace(msg.FileName)
+		if fileName == "" {
+			fileName = msg.FileKey + ".png"
+		}
+		return []IncomingImage{{
+			FileKey:  msg.FileKey,
+			FileName: fileName,
+		}}
+	}
+	return nil
+}
+
+func imImagePayloads(images []IncomingImage) ([]string, types.MessageImages) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	imageURLs := make([]string, 0, len(images))
+	messageImages := make(types.MessageImages, 0, len(images))
+	for _, image := range images {
+		switch {
+		case image.DataURI != "":
+			imageURLs = append(imageURLs, image.DataURI)
+		case image.URL != "":
+			imageURLs = append(imageURLs, image.URL)
+		}
+		if image.URL != "" {
+			messageImages = append(messageImages, types.MessageImage{URL: image.URL})
+		}
+	}
+	return imageURLs, messageImages
+}
+
+func detectIMImage(data []byte) (mimeType, extension string, err error) {
+	mimeType = http.DetectContentType(data)
+	switch mimeType {
+	case "image/png":
+		return mimeType, ".png", nil
+	case "image/jpeg":
+		return mimeType, ".jpg", nil
+	case "image/gif":
+		return mimeType, ".gif", nil
+	case "image/webp":
+		return mimeType, ".webp", nil
+	default:
+		return "", "", fmt.Errorf("unsupported image content type %q", mimeType)
+	}
+}
+
+func (s *Service) resolveIMImageUploadFileService(
+	ctx context.Context,
+	tenant *types.Tenant,
+	storageProvider string,
+) interfaces.FileService {
+	if s.storageResolver != nil && tenant != nil {
+		fileService, provider, err := s.storageResolver.ResolveFileService(
+			ctx, tenant, "", storageProvider, imLocalStorageBaseDir(),
+		)
+		if err == nil && fileService != nil {
+			logger.Infof(ctx, "[IM] image upload storage resolved: provider=%s", provider)
+			return fileService
+		}
+		if err != nil {
+			logger.Warnf(ctx, "[IM] image upload storage resolution failed: provider=%s err=%v", storageProvider, err)
+		}
+	}
+	if strings.TrimSpace(storageProvider) != "" {
+		if fileService := buildIMFileServiceForProvider(tenant, storageProvider, s.defaultFileSvc); fileService != nil {
+			return fileService
+		}
+	}
+	return s.defaultFileSvc
+}
+
+func (s *Service) prepareIncomingImages(
+	ctx context.Context,
+	msg *IncomingMessage,
+	adapter Adapter,
+	tenant *types.Tenant,
+	customAgent *types.CustomAgent,
+) error {
+	images := incomingImages(msg)
+	if len(images) == 0 {
+		return nil
+	}
+	if len(images) > maxIMImagesCount {
+		return fmt.Errorf("too many images: got %d, max %d", len(images), maxIMImagesCount)
+	}
+	if tenant == nil {
+		return errors.New("tenant is required for image storage")
+	}
+
+	downloader, ok := adapter.(FileDownloader)
+	if !ok {
+		return fmt.Errorf("adapter for platform %s does not support image download", msg.Platform)
+	}
+
+	storageProvider := ""
+	if customAgent != nil {
+		storageProvider = customAgent.Config.ImageStorageProvider
+	}
+	fileService := s.resolveIMImageUploadFileService(ctx, tenant, storageProvider)
+	if fileService == nil {
+		return errors.New("image storage service is unavailable")
+	}
+
+	prepared := make([]IncomingImage, 0, len(images))
+	for index, image := range images {
+		downloadMessage := *msg
+		downloadMessage.MessageType = MessageTypeImage
+		downloadMessage.FileKey = image.FileKey
+		downloadMessage.FileName = image.FileName
+
+		reader, resolvedName, err := downloader.DownloadFile(ctx, &downloadMessage)
+		if err != nil {
+			return fmt.Errorf("download image %d: %w", index+1, err)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(reader, maxIMImageSize+1))
+		closeErr := reader.Close()
+		if readErr != nil {
+			return fmt.Errorf("read image %d: %w", index+1, readErr)
+		}
+		if closeErr != nil {
+			logger.Warnf(ctx, "[IM] close downloaded image %d failed: %v", index+1, closeErr)
+		}
+		if len(data) > maxIMImageSize {
+			return fmt.Errorf("image %d exceeds %d bytes", index+1, maxIMImageSize)
+		}
+
+		mimeType, extension, err := detectIMImage(data)
+		if err != nil {
+			return fmt.Errorf("validate image %d: %w", index+1, err)
+		}
+		storedName := fmt.Sprintf("chat-images/%s%s", uuid.New().String(), extension)
+		fileURL, err := fileService.SaveBytes(ctx, data, tenant.ID, storedName, false)
+		if err != nil {
+			return fmt.Errorf("save image %d: %w", index+1, err)
+		}
+		if strings.TrimSpace(resolvedName) == "" {
+			resolvedName = image.FileName
+		}
+		prepared = append(prepared, IncomingImage{
+			FileKey:  image.FileKey,
+			FileName: resolvedName,
+			DataURI:  "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+			URL:      fileURL,
+		})
+	}
+	msg.Images = prepared
+	logger.Infof(ctx, "[IM] Prepared %d inbound image(s) for multimodal QA", len(prepared))
+	return nil
 }
 
 func createIMAssistantMessagePayload(sessionID, requestID string) *types.Message {
@@ -1524,21 +1693,17 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 	logger.Debugf(ctx, "[IM] HandleMessage detail: msgid=%s filekey=%s filename=%s",
 		msg.MessageID, msg.FileKey, msg.FileName)
 
-	// ── File/Image message shortcut ──
-	// If the message is a file or image and the channel has a knowledge_base_id configured,
-	// handle it separately without entering the QA pipeline.
-	if (msg.MessageType == MessageTypeFile || msg.MessageType == MessageTypeImage) && channel.KnowledgeBaseID != "" {
+	// Ordinary file attachments keep their existing knowledge-base ingestion
+	// behavior. Images are handled separately as current-turn visual input.
+	if msg.MessageType == MessageTypeFile && channel.KnowledgeBaseID != "" {
 		return s.handleFileMessage(ctx, msg, adapter, channel)
 	}
 
-	// ── Non-text message without text content ──
-	// If the message is an image/file/video but has no text content, the QA pipeline
-	// cannot do anything useful (no vision support in IM yet). Sending an empty query
-	// to KB retrieval would return irrelevant results and cause hallucination.
-	if msg.Content == "" && (msg.MessageType == MessageTypeImage || msg.MessageType == MessageTypeFile) {
+	// A file without a target knowledge base cannot enter the text QA pipeline.
+	if msg.Content == "" && msg.MessageType == MessageTypeFile {
 		logger.Infof(ctx, "[IM] Skipping QA for non-text message without content: type=%s", msg.MessageType)
 		if err := adapter.SendReply(ctx, msg, &ReplyMessage{
-			Content: "当前渠道未配置文件知识库，无法处理图片/文件消息。请在渠道设置中配置文件知识库后再发送，或直接用文字描述您的问题。",
+			Content: "当前渠道未配置文件知识库，无法处理文件消息。请在渠道设置中配置文件知识库后再发送。",
 			IsFinal: true,
 		}); err != nil {
 			logger.Warnf(ctx, "[IM] Failed to send non-text hint reply: %v", err)
@@ -1583,6 +1748,29 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 			IsFinal: true,
 		})
 		return nil
+	}
+
+	images := incomingImages(msg)
+	if len(images) > 0 {
+		if customAgent == nil || !customAgent.Config.ImageUploadEnabled {
+			logger.Infof(ctx, "[IM] Image input rejected because the bound agent has image upload disabled")
+			_ = adapter.SendReply(ctx, msg, &ReplyMessage{
+				Content: "当前智能体尚未开启图片理解。请先在智能体设置中开启图片上传，并配置支持视觉的模型。",
+				IsFinal: true,
+			})
+			return nil
+		}
+		if len(images) > maxIMImagesCount {
+			_ = adapter.SendReply(ctx, msg, &ReplyMessage{
+				Content: fmt.Sprintf("一次最多可以分析 %d 张图片，请减少图片数量后重试。", maxIMImagesCount),
+				IsFinal: true,
+			})
+			return nil
+		}
+		msg.Images = images
+		if strings.TrimSpace(msg.Content) == "" {
+			msg.Content = "请分析这张图片，并说明它与当前问题或知识库内容的关系。"
+		}
 	}
 
 	// 4. Get the WeKnora session. The IM channel and tenant were already
@@ -1718,6 +1906,17 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// over an agent configured with KBSelectionMode=all.
 	kbIDs := append([]string(nil), req.knowledgeBaseIDs...)
 
+	if len(incomingImages(req.msg)) > 0 {
+		if err := s.prepareIncomingImages(ctx, req.msg, req.adapter, req.tenant, req.agent); err != nil {
+			logger.Errorf(ctx, "[IM] Failed to prepare inbound images: %v", err)
+			_ = req.adapter.SendReply(ctx, req.msg, &ReplyMessage{
+				Content: "图片读取或保存失败，请重新发送图片后再试。支持 PNG、JPEG、GIF、WebP，单张不超过 10MB。",
+				IsFinal: true,
+			})
+			return
+		}
+	}
+
 	// Determine output mode from channel config.
 	streamDisabled := req.channel.OutputMode == "full"
 
@@ -1732,7 +1931,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	// Non-streaming fallback: collect full answer then send.
-	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote)
+	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote, req.msg.Images)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA failed: %v, sending fallback reply", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
@@ -2476,7 +2675,11 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	requestID := uuid.New().String()
 
 	// Create user message
-	userMsg, err := s.messageService.CreateMessage(qaCtx, createIMUserMessagePayload(session.ID, msg.Content, requestID))
+	imageURLs, messageImages := imImagePayloads(msg.Images)
+	userMsg, err := s.messageService.CreateMessage(
+		qaCtx,
+		createIMUserMessagePayload(session.ID, msg.Content, requestID, messageImages),
+	)
 	if err != nil {
 		return fmt.Errorf("create user message: %w", err)
 	}
@@ -2504,7 +2707,16 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 	// Run QA async
 	go func() {
 		var err error
-		req := buildIMQARequest(session, msg.Content, assistantMsg.ID, userMsg.ID, customAgent, kbIDs, msg.Quote)
+		req := buildIMQARequest(
+			session,
+			msg.Content,
+			assistantMsg.ID,
+			userMsg.ID,
+			customAgent,
+			kbIDs,
+			msg.Quote,
+			imageURLs,
+		)
 		if req.QuotedContext != "" {
 			logger.Debugf(qaCtx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}
@@ -2634,7 +2846,7 @@ loop:
 
 // fallbackNonStream is used when streaming initialization fails.
 func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, tenant *types.Tenant) error {
-	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote)
+	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote, msg.Images)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA fallback failed: %v", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
@@ -2657,7 +2869,16 @@ func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, s
 }
 
 // runQA executes the WeKnora QA pipeline and returns the full answer text.
-func (s *Service) runQA(ctx context.Context, session *types.Session, query string, customAgent *types.CustomAgent, kbIDs []string, userKey string, quote *QuotedMessage) (string, error) {
+func (s *Service) runQA(
+	ctx context.Context,
+	session *types.Session,
+	query string,
+	customAgent *types.CustomAgent,
+	kbIDs []string,
+	userKey string,
+	quote *QuotedMessage,
+	images []IncomingImage,
+) (string, error) {
 	// Cancellable context (no hard deadline): each agent round has its own
 	// LLMCallTimeout. The context can still be cancelled by /stop.
 	ctx, cancel := context.WithCancel(ctx)
@@ -2729,7 +2950,11 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	requestID := uuid.New().String()
 
 	// Create user message so it appears in conversation history
-	userMsg, err := s.messageService.CreateMessage(ctx, createIMUserMessagePayload(session.ID, query, requestID))
+	imageURLs, messageImages := imImagePayloads(images)
+	userMsg, err := s.messageService.CreateMessage(
+		ctx,
+		createIMUserMessagePayload(session.ID, query, requestID, messageImages),
+	)
 	if err != nil {
 		return "", fmt.Errorf("create user message: %w", err)
 	}
@@ -2783,7 +3008,16 @@ func (s *Service) runQA(ctx context.Context, session *types.Session, query strin
 	// Run QA async
 	go func() {
 		var err error
-		req := buildIMQARequest(session, query, assistantMsg.ID, userMsg.ID, customAgent, kbIDs, quote)
+		req := buildIMQARequest(
+			session,
+			query,
+			assistantMsg.ID,
+			userMsg.ID,
+			customAgent,
+			kbIDs,
+			quote,
+			imageURLs,
+		)
 		if req.QuotedContext != "" {
 			logger.Debugf(ctx, "[IM] QuotedContext set: length=%d", len(req.QuotedContext))
 		}

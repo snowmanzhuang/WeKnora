@@ -42,8 +42,13 @@ type OpenAIEmbedRequest struct {
 type OpenAIEmbedResponse struct {
 	Data []struct {
 		Embedding []float32 `json:"embedding"`
-		Index     int       `json:"index"`
+		Index     *int      `json:"index,omitempty"`
 	} `json:"data"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	} `json:"error,omitempty"`
 }
 
 // NewOpenAIEmbedder creates a new OpenAI embedder
@@ -239,11 +244,51 @@ func (e *OpenAIEmbedder) BatchEmbed(ctx context.Context, texts []string) ([][]fl
 		logger.GetLogger(ctx).Errorf("OpenAIEmbedder EmbedBatch unmarshal response error: %v", err)
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
+	if response.Error != nil {
+		logger.GetLogger(ctx).Errorf(
+			"OpenAIEmbedder EmbedBatch API returned an error envelope with HTTP 200: type=%s code=%v message=%s",
+			response.Error.Type, response.Error.Code, response.Error.Message)
+		return nil, fmt.Errorf("embedding API error in HTTP 200 response: %s", response.Error.Message)
+	}
+	if len(response.Data) != len(texts) {
+		logger.GetLogger(ctx).Errorf(
+			"OpenAIEmbedder EmbedBatch invalid response count: model=%s expected=%d actual=%d",
+			e.modelName, len(texts), len(response.Data))
+		return nil, fmt.Errorf("embedding API returned %d vectors for %d inputs",
+			len(response.Data), len(texts))
+	}
 
 	// Extract embedding vectors
-	embeddings := make([][]float32, 0, len(response.Data))
+	embeddings := make([][]float32, len(response.Data))
+	hasIndexes := false
 	for _, data := range response.Data {
-		embeddings = append(embeddings, data.Embedding)
+		if data.Index != nil {
+			hasIndexes = true
+			break
+		}
+	}
+
+	seen := make([]bool, len(response.Data))
+	for responsePosition, data := range response.Data {
+		targetPosition := responsePosition
+		if hasIndexes {
+			if data.Index == nil {
+				return nil, fmt.Errorf("embedding API omitted index at response position %d", responsePosition)
+			}
+			targetPosition = *data.Index
+			if targetPosition < 0 || targetPosition >= len(response.Data) {
+				return nil, fmt.Errorf("embedding API returned out-of-range index %d at response position %d",
+					targetPosition, responsePosition)
+			}
+			if seen[targetPosition] {
+				return nil, fmt.Errorf("embedding API returned duplicate index %d", targetPosition)
+			}
+			seen[targetPosition] = true
+		}
+		if len(data.Embedding) == 0 {
+			return nil, fmt.Errorf("embedding API returned an empty vector at index %d", targetPosition)
+		}
+		embeddings[targetPosition] = data.Embedding
 	}
 
 	return embeddings, nil

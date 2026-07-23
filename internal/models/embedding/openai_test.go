@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -44,12 +45,62 @@ func TestOpenAIEmbedderBatchEmbedOmitsDimensionsForFixedSizeModels(t *testing.T)
 	}
 }
 
+func TestOpenAIEmbedderBatchEmbedRejectsEmptyData(t *testing.T) {
+	embedder := newTestOpenAIEmbedder(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+
+	_, err := embedder.BatchEmbed(context.Background(), []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "returned 0 vectors for 1 inputs") {
+		t.Fatalf("BatchEmbed error = %v, want response-count error", err)
+	}
+}
+
+func TestOpenAIEmbedderBatchEmbedRejectsEmptyVector(t *testing.T) {
+	embedder := newTestOpenAIEmbedder(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[],"index":0}]}`))
+	}))
+
+	_, err := embedder.BatchEmbed(context.Background(), []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "empty vector at index 0") {
+		t.Fatalf("BatchEmbed error = %v, want empty-vector error", err)
+	}
+}
+
+func TestOpenAIEmbedderBatchEmbedRestoresInputOrder(t *testing.T) {
+	embedder := newTestOpenAIEmbedder(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[2],"index":1},{"embedding":[1],"index":0}]}`))
+	}))
+
+	got, err := embedder.BatchEmbed(context.Background(), []string{"first", "second"})
+	if err != nil {
+		t.Fatalf("BatchEmbed: %v", err)
+	}
+	if len(got) != 2 || len(got[0]) != 1 || got[0][0] != 1 || len(got[1]) != 1 || got[1][0] != 2 {
+		t.Fatalf("BatchEmbed returned vectors in the wrong order: %v", got)
+	}
+}
+
+func TestOpenAIEmbedderBatchEmbedRejectsErrorEnvelopeWithHTTP200(t *testing.T) {
+	embedder := newTestOpenAIEmbedder(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary provider failure","type":"provider_error","code":502}}`))
+	}))
+
+	_, err := embedder.BatchEmbed(context.Background(), []string{"hello"})
+	if err == nil || !strings.Contains(err.Error(), "temporary provider failure") {
+		t.Fatalf("BatchEmbed error = %v, want error-envelope message", err)
+	}
+}
+
 func captureOpenAIEmbeddingRequest(t *testing.T, modelName string, dimensions int, supportsDimensionOverride bool) map[string]any {
 	t.Helper()
-	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
 
 	requestBody := map[string]any{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	embedder := newTestOpenAIEmbedder(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/embeddings" {
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
 		}
@@ -59,20 +110,8 @@ func captureOpenAIEmbeddingRequest(t *testing.T, modelName string, dimensions in
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2],"index":0}]}`))
 	}))
-	defer server.Close()
-
-	embedder, err := NewOpenAIEmbedder(
-		"test-key",
-		server.URL,
-		modelName,
-		511,
-		dimensions,
-		"8f7d6082-5a15-4f84-ae55-88b2bdac4ba0",
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("NewOpenAIEmbedder: %v", err)
-	}
+	embedder.modelName = modelName
+	embedder.dimensions = dimensions
 	embedder.SetSupportsDimensionOverride(supportsDimensionOverride)
 
 	if _, err := embedder.BatchEmbed(context.Background(), []string{"hello"}); err != nil {
@@ -80,4 +119,26 @@ func captureOpenAIEmbeddingRequest(t *testing.T, modelName string, dimensions in
 	}
 
 	return requestBody
+}
+
+func newTestOpenAIEmbedder(t *testing.T, handler http.Handler) *OpenAIEmbedder {
+	t.Helper()
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	embedder, err := NewOpenAIEmbedder(
+		"test-key",
+		server.URL,
+		"test-embedding-model",
+		511,
+		2,
+		"8f7d6082-5a15-4f84-ae55-88b2bdac4ba0",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewOpenAIEmbedder: %v", err)
+	}
+	return embedder
 }

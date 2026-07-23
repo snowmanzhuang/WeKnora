@@ -74,7 +74,7 @@ func TestBuildIMQARequest_QuotedContext(t *testing.T) {
 	session := &types.Session{ID: "s1"}
 
 	t.Run("nil quote produces empty QuotedContext", func(t *testing.T) {
-		req := buildIMQARequest(session, "hello", "a1", "u1", nil, nil, nil)
+		req := buildIMQARequest(session, "hello", "a1", "u1", nil, nil, nil, nil)
 		if req.QuotedContext != "" {
 			t.Errorf("QuotedContext = %q, want empty", req.QuotedContext)
 		}
@@ -85,7 +85,7 @@ func TestBuildIMQARequest_QuotedContext(t *testing.T) {
 
 	t.Run("bot quote sets QuotedContext with bot label", func(t *testing.T) {
 		quote := &QuotedMessage{Content: "bot reply", IsBotMessage: true}
-		req := buildIMQARequest(session, "follow up", "a1", "u1", nil, nil, quote)
+		req := buildIMQARequest(session, "follow up", "a1", "u1", nil, nil, quote, nil)
 		if req.Query != "follow up" {
 			t.Errorf("Query = %q, want %q", req.Query, "follow up")
 		}
@@ -97,7 +97,7 @@ func TestBuildIMQARequest_QuotedContext(t *testing.T) {
 
 	t.Run("user quote sets QuotedContext with user label", func(t *testing.T) {
 		quote := &QuotedMessage{Content: "user msg", IsBotMessage: false}
-		req := buildIMQARequest(session, "question", "a1", "u1", nil, nil, quote)
+		req := buildIMQARequest(session, "question", "a1", "u1", nil, nil, quote, nil)
 		want := "以下是用户引用的一条历史消息，仅作为上下文参考：\n<quoted_message>\nuser msg\n</quoted_message>"
 		if req.QuotedContext != want {
 			t.Errorf("QuotedContext = %q, want %q", req.QuotedContext, want)

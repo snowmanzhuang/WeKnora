@@ -258,11 +258,15 @@ func convertImageEvent(
 		MessageID:   messageID,
 		FileKey:     imageContent.ImageKey,
 		FileName:    imageContent.ImageKey + ".png",
+		Images: []im.IncomingImage{{
+			FileKey:  imageContent.ImageKey,
+			FileName: imageContent.ImageKey + ".png",
+		}},
 	}
 }
 
 // convertPostEvent handles rich-text (post) message type.
-// Extracts all plain text content and treats it as a text query for QA.
+// Preserves both plain text and inline images for multimodal QA.
 func convertPostEvent(
 	region Region, msg *larkim.EventMessage,
 	openID, chatID string, chatType im.ChatType, messageID string,
@@ -271,43 +275,11 @@ func convertPostEvent(
 		return nil
 	}
 
-	// Post content structure: {"title":"...", "content":[[{"tag":"text","text":"..."},{"tag":"a","href":"...","text":"..."}]]}
-	var postContent struct {
-		Title   string              `json:"title"`
-		Content [][]json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal([]byte(*msg.Content), &postContent); err != nil {
+	content, images, err := parsePostMessageContent(*msg.Content)
+	if err != nil {
 		return nil
 	}
 
-	var textParts []string
-	if postContent.Title != "" {
-		textParts = append(textParts, postContent.Title)
-	}
-
-	for _, line := range postContent.Content {
-		var lineText strings.Builder
-		for _, elem := range line {
-			var tag struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(elem, &tag); err != nil {
-				continue
-			}
-			switch tag.Tag {
-			case "text", "a":
-				lineText.WriteString(tag.Text)
-			case "at":
-				// Skip @mentions
-			}
-		}
-		if t := strings.TrimSpace(lineText.String()); t != "" {
-			textParts = append(textParts, t)
-		}
-	}
-
-	content := strings.Join(textParts, "\n")
 	if chatType == im.ChatTypeGroup {
 		for strings.HasPrefix(content, "@_user_") {
 			idx := strings.Index(content, " ")
@@ -320,7 +292,7 @@ func convertPostEvent(
 	}
 
 	content = strings.TrimSpace(content)
-	if content == "" {
+	if content == "" && len(images) == 0 {
 		return nil
 	}
 
@@ -332,6 +304,7 @@ func convertPostEvent(
 		ChatType:    chatType,
 		Content:     content,
 		MessageID:   messageID,
+		Images:      images,
 	}
 }
 

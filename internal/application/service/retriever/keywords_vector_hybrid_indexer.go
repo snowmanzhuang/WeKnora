@@ -2,6 +2,7 @@ package retriever
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"slices"
 	"strings"
@@ -140,6 +141,12 @@ func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, con
 			return embeddings, nil
 		}
 		logger.Errorf(ctx, "BatchEmbedWithPool attempt %d/%d failed: %v", attempt+1, embedRetryAttempts, err)
+		if errors.Is(err, embedding.ErrEmbeddingSubBatchRetriesExhausted) {
+			// The pool already retried only the failed small batch. Retrying the
+			// whole document here would throw away all successful vectors and
+			// repeat thousands of paid calls.
+			return nil, err
+		}
 		if attempt+1 < embedRetryAttempts {
 			select {
 			case <-time.After(delay):

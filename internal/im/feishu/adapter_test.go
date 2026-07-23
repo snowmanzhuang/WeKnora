@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/im"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -159,6 +160,95 @@ func TestFeishuMessageStruct_JSONFields(t *testing.T) {
 	}
 	if msg.MessageID != "" {
 		t.Errorf("MessageID zero value = %q, want empty", msg.MessageID)
+	}
+}
+
+func TestParsePostMessageContent_PreservesTextAndImages(t *testing.T) {
+	raw := `{
+		"title":"眼科图片",
+		"content":[
+			[
+				{"tag":"at","user_id":"ou_bot"},
+				{"tag":"text","text":"这是什么？"},
+				{"tag":"img","image_key":"img_v2_first"}
+			],
+			[
+				{"tag":"a","text":"补充链接","href":"https://example.com"},
+				{"tag":"img","image_key":"img_v2_second"},
+				{"tag":"img","image_key":"img_v2_first"}
+			]
+		]
+	}`
+
+	content, images, err := parsePostMessageContent(raw)
+	if err != nil {
+		t.Fatalf("parsePostMessageContent: %v", err)
+	}
+	if content != "眼科图片\n这是什么？\n补充链接" {
+		t.Fatalf("content = %q", content)
+	}
+	if len(images) != 2 {
+		t.Fatalf("len(images) = %d, want 2", len(images))
+	}
+	if images[0].FileKey != "img_v2_first" || images[1].FileKey != "img_v2_second" {
+		t.Fatalf("unexpected image keys: %#v", images)
+	}
+	if images[0].FileName != "img_v2_first.png" {
+		t.Fatalf("first image filename = %q", images[0].FileName)
+	}
+}
+
+func TestParsePostMessageContent_ImageOnly(t *testing.T) {
+	content, images, err := parsePostMessageContent(
+		`{"content":[[{"tag":"img","image_key":"img_v2_only"}]]}`,
+	)
+	if err != nil {
+		t.Fatalf("parsePostMessageContent: %v", err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty", content)
+	}
+	if len(images) != 1 || images[0].FileKey != "img_v2_only" {
+		t.Fatalf("images = %#v", images)
+	}
+}
+
+func TestConvertPostEvent_PreservesImagesForWebSocketMode(t *testing.T) {
+	raw := `{"content":[[{"tag":"text","text":"这是什么？"},{"tag":"img","image_key":"img_ws_1"}]]}`
+	got := convertPostEvent(
+		RegionFeishu,
+		&larkim.EventMessage{Content: &raw},
+		"ou_user",
+		"oc_chat",
+		im.ChatTypeGroup,
+		"om_message",
+	)
+	if got == nil {
+		t.Fatal("convertPostEvent returned nil")
+	}
+	if got.Content != "这是什么？" {
+		t.Fatalf("content = %q", got.Content)
+	}
+	if len(got.Images) != 1 || got.Images[0].FileKey != "img_ws_1" {
+		t.Fatalf("images = %#v", got.Images)
+	}
+}
+
+func TestConvertImageEvent_AddsImageAttachmentForWebSocketMode(t *testing.T) {
+	raw := `{"image_key":"img_ws_only"}`
+	got := convertImageEvent(
+		RegionFeishu,
+		&larkim.EventMessage{Content: &raw},
+		"ou_user",
+		"",
+		im.ChatTypeDirect,
+		"om_message",
+	)
+	if got == nil {
+		t.Fatal("convertImageEvent returned nil")
+	}
+	if len(got.Images) != 1 || got.Images[0].FileKey != "img_ws_only" {
+		t.Fatalf("images = %#v", got.Images)
 	}
 }
 

@@ -44,6 +44,16 @@ const (
 	MessageTypeImage MessageType = "image"
 )
 
+// IncomingImage identifies an image attachment carried by an IM message.
+// DataURI and URL are populated internally after the platform resource is
+// downloaded; adapters only need to set FileKey and FileName.
+type IncomingImage struct {
+	FileKey  string
+	FileName string
+	DataURI  string
+	URL      string
+}
+
 // IncomingMessage is the unified message parsed from an IM callback.
 type IncomingMessage struct {
 	// Platform identifies which IM platform the message comes from.
@@ -68,6 +78,9 @@ type IncomingMessage struct {
 	FileName string
 	// FileSize is the file size in bytes (for file messages, optional).
 	FileSize int64
+	// Images contains image attachments from standalone image messages or
+	// rich-text messages that carry text and one or more inline images.
+	Images []IncomingImage
 	// ThreadID is the platform-specific thread identifier.
 	// - Slack: thread_ts (top-level message uses its own timestamp)
 	// - Mattermost: root_id, or post_id if top-level

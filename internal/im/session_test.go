@@ -215,7 +215,7 @@ func TestChannelKnowledgeBaseIDs(t *testing.T) {
 }
 
 func TestCreateIMMessagePayloadsShareRequestShape(t *testing.T) {
-	userMsg := createIMUserMessagePayload("session-1", "hello", "request-1")
+	userMsg := createIMUserMessagePayload("session-1", "hello", "request-1", nil)
 	assistantMsg := createIMAssistantMessagePayload("session-1", "request-1")
 
 	if userMsg.SessionID != "session-1" || assistantMsg.SessionID != "session-1" {
