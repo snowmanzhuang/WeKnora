@@ -46,6 +46,7 @@ type qaRequest struct {
 	// knowledgeBaseIDs is the channel's explicit retrieval scope. It is copied
 	// when enqueued so a later channel edit cannot change an in-flight request.
 	knowledgeBaseIDs []string
+	knowledgeRouting *types.KnowledgeRoutingConfig
 
 	// tenant is used to resolve provider:// URLs in outbound replies (scheme-aware).
 	tenant *types.Tenant

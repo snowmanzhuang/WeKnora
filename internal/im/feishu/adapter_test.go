@@ -252,6 +252,44 @@ func TestConvertImageEvent_AddsImageAttachmentForWebSocketMode(t *testing.T) {
 	}
 }
 
+func TestConvertEventMentions_PreservesBotNames(t *testing.T) {
+	key00, name00 := "@_user_1", "00汇总机器人"
+	key07, name07 := "@_user_2", "07神经眼科"
+	got := convertEventMentions(&larkim.EventMessage{
+		Mentions: []*larkim.MentionEvent{
+			{Key: &key00, Name: &name00},
+			{Key: &key07, Name: &name07},
+		},
+	})
+	if len(got) != 2 {
+		t.Fatalf("mentions = %#v", got)
+	}
+	if got[0].Key != key00 || got[0].Name != name00 ||
+		got[1].Key != key07 || got[1].Name != name07 {
+		t.Fatalf("mentions were not preserved: %#v", got)
+	}
+}
+
+func TestStableFeishuUserID_PrefersUnionID(t *testing.T) {
+	unionID := "on_union"
+	tenantUserID := "ou_tenant"
+	got := stableFeishuUserID(&larkim.UserId{
+		UnionId: &unionID,
+		UserId:  &tenantUserID,
+	})
+	if got != unionID {
+		t.Fatalf("stable user ID = %q, want %q", got, unionID)
+	}
+}
+
+func TestStableFeishuUserID_FallsBackToTenantUserID(t *testing.T) {
+	tenantUserID := "ou_tenant"
+	got := stableFeishuUserID(&larkim.UserId{UserId: &tenantUserID})
+	if got != tenantUserID {
+		t.Fatalf("stable user ID = %q, want %q", got, tenantUserID)
+	}
+}
+
 func TestImageCacheKey_StripsQuery(t *testing.T) {
 	cases := map[string]string{
 		"https://host/a.png?sig=1&t=2": "https://host/a.png",
@@ -374,7 +412,16 @@ func TestBuildStaticCardJSON_ContainsInlineImage(t *testing.T) {
 func TestNormalizeFeishuImageCaptionSpacing(t *testing.T) {
 	longAlt := "Fig. 32 [A] (continued) posterior membrane-like structure"
 	input := "正文\n\n![" + longAlt + "](img_test_inline)\n\n图示病例表现为角膜水肿。\n\n## 下一节"
-	want := "正文\n\n![" + longAlt + "](img_test_inline)\n图示病例表现为角膜水肿。\n\n## 下一节"
+	want := "正文\n\n![" + longAlt + "](img_test_inline)图示病例表现为角膜水肿。\n\n## 下一节"
+
+	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
+		t.Fatalf("normalized content = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeFeishuImageCaptionSpacing_RemovesSingleSourceNewline(t *testing.T) {
+	input := "![房角镜图](img_test_inline)\n房角镜下可见正常前房角结构。"
+	want := "![房角镜图](img_test_inline)房角镜下可见正常前房角结构。"
 
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized content = %q, want %q", got, want)
@@ -413,7 +460,7 @@ func TestNormalizeFeishuImageCaptionSpacing_LeavesNonFeishuImageUntouched(t *tes
 
 func TestNormalizeFeishuImageCaptionSpacing_HandlesAdjacentImagesIndependently(t *testing.T) {
 	input := "![第一张](img_first)\n\n![第二张](img_second)\n\n第二张的图注"
-	want := "![第一张](img_first)\n\n![第二张](img_second)\n第二张的图注"
+	want := "![第一张](img_first)\n\n![第二张](img_second)第二张的图注"
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized content = %q, want %q", got, want)
 	}
@@ -448,7 +495,7 @@ func TestSendReply_WithInlineImageSendsStaticCard(t *testing.T) {
 			if len(card.Body.Elements) != 1 {
 				t.Fatalf("card elements = %d, want 1", len(card.Body.Elements))
 			}
-			wantContent := "前文\n\n![眼底图](img_test_inline)\n后文"
+			wantContent := "前文\n\n![眼底图](img_test_inline)后文"
 			if card.Body.Elements[0].Content != wantContent {
 				t.Fatalf("card content = %q, want %q", card.Body.Elements[0].Content, wantContent)
 			}

@@ -112,6 +112,7 @@ func (s *sessionService) KnowledgeQA(
 			KnowledgeBaseIDs:        knowledgeBaseIDs,
 			KnowledgeIDs:            knowledgeIDs,
 			SearchTargets:           searchTargets,
+			KnowledgeRouting:        req.KnowledgeRouting.Clone(),
 			VectorThreshold:         s.cfg.Conversation.VectorThreshold,
 			KeywordThreshold:        s.cfg.Conversation.KeywordThreshold,
 			EmbeddingTopK:           s.cfg.Conversation.EmbeddingTopK,

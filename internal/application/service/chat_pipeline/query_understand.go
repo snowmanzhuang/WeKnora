@@ -25,9 +25,10 @@ type PluginQueryUnderstand struct {
 var rewriteImageSepPattern = regexp.MustCompile(`(?s)^(.*?)\s*\n?---\n(.*)$`)
 
 type queryUnderstandOutput struct {
-	RewriteQuery     string            `json:"rewrite_query"`
-	Intent           types.QueryIntent `json:"intent"`
-	ImageDescription string            `json:"image_description"`
+	RewriteQuery       string            `json:"rewrite_query"`
+	Intent             types.QueryIntent `json:"intent"`
+	ImageDescription   string            `json:"image_description"`
+	KnowledgeBaseCodes []string          `json:"knowledge_base_codes"`
 }
 
 // NewPluginQueryUnderstand creates a new query-understanding plugin instance
@@ -110,6 +111,8 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 	maxTokens := 150
 	if useImages {
 		maxTokens = 500
+	} else if chatManage.KnowledgeRouting != nil {
+		maxTokens = 220
 	}
 
 	// --- Call model ---
@@ -153,6 +156,7 @@ func (p *PluginQueryUnderstand) OnEvent(ctx context.Context,
 		"session_id":          chatManage.SessionID,
 		"rewrite_query":       chatManage.RewriteQuery,
 		"intent":              chatManage.Intent,
+		"knowledge_base_ids":  chatManage.KnowledgeBaseIDs,
 		"has_image_desc":      chatManage.ImageDescription != "",
 		"has_prompt_override": chatManage.SystemPromptOverride != "",
 		"original_output":     response.Content,
@@ -317,10 +321,14 @@ func (p *PluginQueryUnderstand) buildPrompts(chatManage *types.ChatManage, histo
 // parseOutput extracts the rewritten query, intent classification, and optional
 // image description from the model's structured JSON output.
 //
-// Expected format: {"rewrite_query":"...","intent":"kb_search","image_description":"..."}
+// Expected format:
+// {"rewrite_query":"...","intent":"kb_search","image_description":"...",
+//
+//	"knowledge_base_codes":["01","03"]}
 func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw string) {
 	content := strings.TrimSpace(raw)
 	if content == "" {
+		applyKnowledgeRouting(chatManage, nil)
 		return
 	}
 
@@ -330,6 +338,7 @@ func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw st
 		}
 		chatManage.Intent = output.Intent
 		chatManage.ImageDescription = strings.TrimSpace(output.ImageDescription)
+		applyKnowledgeRouting(chatManage, output.KnowledgeBaseCodes)
 		return
 	}
 
@@ -338,6 +347,7 @@ func (p *PluginQueryUnderstand) parseOutput(chatManage *types.ChatManage, raw st
 	if content != "" {
 		chatManage.RewriteQuery = content
 	}
+	applyKnowledgeRouting(chatManage, nil)
 }
 
 func parseStructuredQueryOutput(raw string) (queryUnderstandOutput, bool) {
@@ -387,6 +397,8 @@ func parseStructuredQueryOutputJSON(content string) (queryUnderstandOutput, bool
 	if set {
 		out.ImageDescription = combined
 	}
+	out.KnowledgeBaseCodes = firstStringSliceField(obj,
+		"knowledge_base_codes", "kb_codes", "selected_knowledge_bases")
 
 	return out, true
 }
@@ -402,6 +414,111 @@ func firstStringField(obj map[string]json.RawMessage, keys ...string) string {
 		if err := json.Unmarshal(raw, &s); err == nil {
 			return s
 		}
+	}
+	return ""
+}
+
+func firstStringSliceField(obj map[string]json.RawMessage, keys ...string) []string {
+	for _, key := range keys {
+		raw, ok := obj[key]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+
+		var values []string
+		if err := json.Unmarshal(raw, &values); err == nil {
+			return values
+		}
+
+		var single string
+		if err := json.Unmarshal(raw, &single); err == nil && strings.TrimSpace(single) != "" {
+			return strings.FieldsFunc(single, func(r rune) bool {
+				return r == ',' || r == '，' || r == ';' || r == '；' || r == ' '
+			})
+		}
+	}
+	return nil
+}
+
+// applyKnowledgeRouting narrows the already-authorized runtime retrieval scope
+// to the knowledge bases selected by query understanding. Required IDs are
+// always unioned in. Explicit-only routing ignores model-selected codes. If
+// the model omits or produces only invalid route codes, the existing all-KB
+// scope is retained unless explicit required IDs exist.
+func applyKnowledgeRouting(chatManage *types.ChatManage, routeCodes []string) {
+	if chatManage == nil || chatManage.KnowledgeRouting == nil {
+		return
+	}
+
+	if chatManage.Intent != types.IntentKBSearch &&
+		chatManage.Intent != types.IntentClarification &&
+		chatManage.Intent != "" {
+		chatManage.KnowledgeBaseIDs = nil
+		chatManage.SearchTargets = nil
+		return
+	}
+
+	routeIDByCode := make(map[string]string, len(chatManage.KnowledgeRouting.Routes))
+	for _, route := range chatManage.KnowledgeRouting.Routes {
+		code := normalizeKnowledgeRouteCode(route.Code)
+		id := strings.TrimSpace(route.KnowledgeBaseID)
+		if code != "" && id != "" {
+			routeIDByCode[code] = id
+		}
+	}
+
+	selectedIDs := make(map[string]struct{})
+	if !chatManage.KnowledgeRouting.ExplicitOnly {
+		for _, rawCode := range routeCodes {
+			if id := routeIDByCode[normalizeKnowledgeRouteCode(rawCode)]; id != "" {
+				selectedIDs[id] = struct{}{}
+			}
+		}
+	}
+
+	for _, id := range chatManage.KnowledgeRouting.RequiredKnowledgeBaseIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			selectedIDs[id] = struct{}{}
+		}
+	}
+
+	if len(selectedIDs) == 0 {
+		return
+	}
+
+	filteredKBIDs := make([]string, 0, len(chatManage.KnowledgeBaseIDs))
+	for _, id := range chatManage.KnowledgeBaseIDs {
+		if _, ok := selectedIDs[id]; ok {
+			filteredKBIDs = append(filteredKBIDs, id)
+		}
+	}
+
+	filteredTargets := make(types.SearchTargets, 0, len(chatManage.SearchTargets))
+	for _, target := range chatManage.SearchTargets {
+		if target == nil {
+			continue
+		}
+		if _, ok := selectedIDs[target.KnowledgeBaseID]; ok {
+			filteredTargets = append(filteredTargets, target)
+		}
+	}
+
+	// Never replace a valid authorized scope with an empty one because of stale
+	// route metadata. Keeping the original scope is the safe retrieval fallback.
+	if len(filteredKBIDs) == 0 && len(filteredTargets) == 0 {
+		return
+	}
+	chatManage.KnowledgeBaseIDs = filteredKBIDs
+	chatManage.SearchTargets = filteredTargets
+}
+
+func normalizeKnowledgeRouteCode(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if len(raw) >= 2 && raw[0] >= '0' && raw[0] <= '9' && raw[1] >= '0' && raw[1] <= '9' {
+		return raw[:2]
+	}
+	if len(raw) == 1 && raw[0] >= '1' && raw[0] <= '9' {
+		return "0" + raw
 	}
 	return ""
 }

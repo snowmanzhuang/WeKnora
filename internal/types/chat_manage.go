@@ -10,13 +10,14 @@ type PipelineRequest struct {
 	MaxRounds int    `json:"max_rounds"`
 
 	// Knowledge base retrieval parameters
-	KnowledgeBaseIDs []string      `json:"knowledge_base_ids"`
-	KnowledgeIDs     []string      `json:"knowledge_ids,omitempty"`
-	SearchTargets    SearchTargets `json:"-"`
-	VectorThreshold  float64       `json:"vector_threshold"`
-	KeywordThreshold float64       `json:"keyword_threshold"`
-	EmbeddingTopK    int           `json:"embedding_top_k"`
-	VectorDatabase   string        `json:"vector_database"`
+	KnowledgeBaseIDs []string                `json:"knowledge_base_ids"`
+	KnowledgeIDs     []string                `json:"knowledge_ids,omitempty"`
+	SearchTargets    SearchTargets           `json:"-"`
+	KnowledgeRouting *KnowledgeRoutingConfig `json:"-"`
+	VectorThreshold  float64                 `json:"vector_threshold"`
+	KeywordThreshold float64                 `json:"keyword_threshold"`
+	EmbeddingTopK    int                     `json:"embedding_top_k"`
+	VectorDatabase   string                  `json:"vector_database"`
 
 	// Rerank parameters
 	RerankModelID   string  `json:"rerank_model_id"`
@@ -156,6 +157,14 @@ func (c *ChatManage) NeedsRetrieval() bool {
 	if c.Intent == IntentWebSearch {
 		return c.WebSearchEnabled
 	}
+	// Aggregate assistants can explicitly clear their request-scoped KB route
+	// after intent classification. In particular, conversation summaries use
+	// IntentSummarize (normally retrieval-capable for legacy broad KB requests)
+	// but must not search when the aggregate router selected no KB scope.
+	if c.KnowledgeRouting != nil && c.Intent == IntentSummarize &&
+		!HasKnowledgeRetrievalScope(c.SearchTargets, c.KnowledgeBaseIDs, c.KnowledgeIDs) {
+		return false
+	}
 	return c.Intent.NeedsKBRetrieval()
 }
 
@@ -209,6 +218,7 @@ func (c *ChatManage) Clone() *ChatManage {
 			KnowledgeBaseIDs:         knowledgeBaseIDs,
 			KnowledgeIDs:             knowledgeIDs,
 			SearchTargets:            searchTargets,
+			KnowledgeRouting:         c.KnowledgeRouting.Clone(),
 			VectorThreshold:          c.VectorThreshold,
 			KeywordThreshold:         c.KeywordThreshold,
 			EmbeddingTopK:            c.EmbeddingTopK,

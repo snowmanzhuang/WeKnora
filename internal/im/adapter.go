@@ -54,6 +54,14 @@ type IncomingImage struct {
 	URL      string
 }
 
+// IncomingMention preserves one platform @mention after message text has been
+// normalized. Key is the placeholder present in the raw message (for example,
+// @_user_1); Name is the platform display name.
+type IncomingMention struct {
+	Key  string
+	Name string
+}
+
 // IncomingMessage is the unified message parsed from an IM callback.
 type IncomingMessage struct {
 	// Platform identifies which IM platform the message comes from.
@@ -62,6 +70,10 @@ type IncomingMessage struct {
 	MessageType MessageType
 	// UserID is the IM-platform user identifier.
 	UserID string
+	// GlobalUserID is a stable cross-application user identifier when the
+	// platform provides one. Aggregate assistants use it to keep one user's
+	// context together even when different bot applications receive the turn.
+	GlobalUserID string
 	// UserName is the display name of the user (optional).
 	UserName string
 	// ChatID is the group/channel ID (empty for direct messages).
@@ -81,6 +93,13 @@ type IncomingMessage struct {
 	// Images contains image attachments from standalone image messages or
 	// rich-text messages that carry text and one or more inline images.
 	Images []IncomingImage
+	// Mentions contains structured @mentions supplied by the IM platform.
+	Mentions []IncomingMention
+	// SummaryExplicitOnly is set internally when a message that mentioned
+	// multiple specialist bots (but not 00) is forwarded to 00. In that mode,
+	// 00 may summarize only the explicitly mentioned specialists' knowledge
+	// bases and must not add knowledge bases through automatic routing.
+	SummaryExplicitOnly bool
 	// ThreadID is the platform-specific thread identifier.
 	// - Slack: thread_ts (top-level message uses its own timestamp)
 	// - Mattermost: root_id, or post_id if top-level

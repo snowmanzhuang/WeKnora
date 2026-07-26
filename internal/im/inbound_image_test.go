@@ -134,6 +134,7 @@ func TestPrepareIncomingImages_DownloadsPersistsAndBuildsQAPayload(t *testing.T)
 		&types.CustomAgent{},
 		nil,
 		nil,
+		nil,
 		imageURLs,
 	)
 	require.Equal(t, imageURLs, qaRequest.ImageURLs)

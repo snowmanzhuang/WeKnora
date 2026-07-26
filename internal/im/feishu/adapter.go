@@ -305,13 +305,19 @@ type feishuEvent struct {
 }
 
 type feishuMessage struct {
-	MessageID   string `json:"message_id"`
-	RootID      string `json:"root_id"`
-	ParentID    string `json:"parent_id"`
-	MessageType string `json:"message_type"`
-	ChatType    string `json:"chat_type"`
-	ChatID      string `json:"chat_id"`
-	Content     string `json:"content"`
+	MessageID   string          `json:"message_id"`
+	RootID      string          `json:"root_id"`
+	ParentID    string          `json:"parent_id"`
+	MessageType string          `json:"message_type"`
+	ChatType    string          `json:"chat_type"`
+	ChatID      string          `json:"chat_id"`
+	Content     string          `json:"content"`
+	Mentions    []feishuMention `json:"mentions"`
+}
+
+type feishuMention struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
 }
 
 type feishuSender struct {
@@ -319,7 +325,9 @@ type feishuSender struct {
 }
 
 type feishuSenderID struct {
-	OpenID string `json:"open_id"`
+	OpenID  string `json:"open_id"`
+	UserID  string `json:"user_id"`
+	UnionID string `json:"union_id"`
 }
 
 // ParseCallback parses a Feishu event callback into a unified IncomingMessage.
@@ -365,6 +373,13 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 		return nil, nil
 	}
 	msg := eventBody.Event.Message
+	mentions := make([]im.IncomingMention, 0, len(msg.Mentions))
+	for _, mention := range msg.Mentions {
+		mentions = append(mentions, im.IncomingMention{
+			Key:  mention.Key,
+			Name: mention.Name,
+		})
+	}
 
 	// Compute thread ID: use root_id for threaded replies, or message_id for top-level messages.
 	threadID := msg.RootID
@@ -382,8 +397,13 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 
 	// Get sender info
 	openID := ""
+	globalUserID := ""
 	if eventBody.Event.Sender != nil && eventBody.Event.Sender.SenderID != nil {
 		openID = eventBody.Event.Sender.SenderID.OpenID
+		globalUserID = eventBody.Event.Sender.SenderID.UnionID
+		if globalUserID == "" {
+			globalUserID = eventBody.Event.Sender.SenderID.UserID
+		}
 	}
 
 	switch msg.MessageType {
@@ -410,14 +430,16 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 		}
 
 		return &im.IncomingMessage{
-			Platform:    a.region.Platform,
-			MessageType: im.MessageTypeText,
-			UserID:      openID,
-			ChatID:      chatID,
-			ChatType:    chatType,
-			Content:     strings.TrimSpace(content),
-			MessageID:   msg.MessageID,
-			ThreadID:    threadID,
+			Platform:     a.region.Platform,
+			MessageType:  im.MessageTypeText,
+			UserID:       openID,
+			GlobalUserID: globalUserID,
+			ChatID:       chatID,
+			ChatType:     chatType,
+			Content:      strings.TrimSpace(content),
+			MessageID:    msg.MessageID,
+			ThreadID:     threadID,
+			Mentions:     mentions,
 		}, nil
 
 	case "file":
@@ -432,15 +454,17 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			return nil, nil
 		}
 		return &im.IncomingMessage{
-			Platform:    a.region.Platform,
-			MessageType: im.MessageTypeFile,
-			UserID:      openID,
-			ChatID:      chatID,
-			ChatType:    chatType,
-			MessageID:   msg.MessageID,
-			ThreadID:    threadID,
-			FileKey:     fileContent.FileKey,
-			FileName:    fileContent.FileName,
+			Platform:     a.region.Platform,
+			MessageType:  im.MessageTypeFile,
+			UserID:       openID,
+			GlobalUserID: globalUserID,
+			ChatID:       chatID,
+			ChatType:     chatType,
+			MessageID:    msg.MessageID,
+			ThreadID:     threadID,
+			FileKey:      fileContent.FileKey,
+			FileName:     fileContent.FileName,
+			Mentions:     mentions,
 		}, nil
 
 	case "image":
@@ -454,19 +478,21 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 			return nil, nil
 		}
 		return &im.IncomingMessage{
-			Platform:    a.region.Platform,
-			MessageType: im.MessageTypeImage,
-			UserID:      openID,
-			ChatID:      chatID,
-			ChatType:    chatType,
-			MessageID:   msg.MessageID,
-			ThreadID:    threadID,
-			FileKey:     imageContent.ImageKey,
-			FileName:    imageContent.ImageKey + ".png",
+			Platform:     a.region.Platform,
+			MessageType:  im.MessageTypeImage,
+			UserID:       openID,
+			GlobalUserID: globalUserID,
+			ChatID:       chatID,
+			ChatType:     chatType,
+			MessageID:    msg.MessageID,
+			ThreadID:     threadID,
+			FileKey:      imageContent.ImageKey,
+			FileName:     imageContent.ImageKey + ".png",
 			Images: []im.IncomingImage{{
 				FileKey:  imageContent.ImageKey,
 				FileName: imageContent.ImageKey + ".png",
 			}},
+			Mentions: mentions,
 		}, nil
 
 	case "post":
@@ -492,15 +518,17 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 		}
 
 		return &im.IncomingMessage{
-			Platform:    a.region.Platform,
-			MessageType: im.MessageTypeText,
-			UserID:      openID,
-			ChatID:      chatID,
-			ChatType:    chatType,
-			Content:     content,
-			MessageID:   msg.MessageID,
-			ThreadID:    threadID,
-			Images:      images,
+			Platform:     a.region.Platform,
+			MessageType:  im.MessageTypeText,
+			UserID:       openID,
+			GlobalUserID: globalUserID,
+			ChatID:       chatID,
+			ChatType:     chatType,
+			Content:      content,
+			MessageID:    msg.MessageID,
+			ThreadID:     threadID,
+			Images:       images,
+			Mentions:     mentions,
 		}, nil
 
 	default:
@@ -1182,22 +1210,22 @@ var (
 //
 //	![image](img_key)\n\ncaption
 //
-// into a single line break between the image and caption. Feishu's CardKit
-// treats two line breaks as a hard break and displays a conspicuous empty row;
-// one line break is sufficient because the image itself is a block element.
+// into ![image](img_key)caption with no source newline between the image and
+// caption. Feishu's CardKit renders the image itself as a block, while even one
+// source newline adds visible vertical space below it.
 // This function is called only by the Feishu/Lark adapter, so stored answers,
 // web rendering, and other IM platforms remain unchanged.
 func normalizeFeishuImageCaptionSpacing(content string) string {
 	lines := strings.Split(content, "\n")
-	if len(lines) < 3 {
+	if len(lines) < 2 {
 		return content
 	}
 
 	result := make([]string, 0, len(lines))
 	changed := false
 	for i := 0; i < len(lines); i++ {
-		result = append(result, lines[i])
 		if !feishuBlockImageLineRe.MatchString(lines[i]) {
+			result = append(result, lines[i])
 			continue
 		}
 
@@ -1205,17 +1233,19 @@ func normalizeFeishuImageCaptionSpacing(content string) string {
 		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
 			next++
 		}
-		if next == i+1 || next >= len(lines) {
+		if next >= len(lines) {
+			result = append(result, lines[i])
 			continue
 		}
 		nextLine := strings.TrimSpace(lines[next])
 		if feishuNonCaptionLineRe.MatchString(nextLine) {
+			result = append(result, lines[i])
 			continue
 		}
 
-		// Skip only the blank lines. The caption itself is handled by the next
-		// loop iteration, which also lets a later image be normalized normally.
-		i = next - 1
+		imageLine := strings.TrimRight(lines[i], " \t\r")
+		result = append(result, imageLine+nextLine)
+		i = next
 		changed = true
 	}
 	if !changed {

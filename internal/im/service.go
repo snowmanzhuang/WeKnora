@@ -410,6 +410,7 @@ type inflightEntry struct {
 // 5. Collects the streaming answer and sends it back via the Adapter
 type Service struct {
 	db             *gorm.DB
+	appConfig      *config.Config
 	sessionService interfaces.SessionService
 	messageService interfaces.MessageService
 	tenantService  interfaces.TenantService
@@ -648,6 +649,7 @@ func buildIMQARequest(
 	userMessageID string,
 	customAgent *types.CustomAgent,
 	kbIDs []string,
+	knowledgeRouting *types.KnowledgeRoutingConfig,
 	quote *QuotedMessage,
 	imageURLs []string,
 ) *types.QARequest {
@@ -666,6 +668,7 @@ func buildIMQARequest(
 		WebSearchEnabled:   webSearchEnabled,
 		QuotedContext:      quotedContext,
 		ImageURLs:          imageURLs,
+		KnowledgeRouting:   knowledgeRouting.Clone(),
 	}
 }
 
@@ -1042,6 +1045,7 @@ func NewService(
 	instanceID := uuid.New().String()
 	s := &Service{
 		db:               db,
+		appConfig:        appCfg,
 		sessionService:   sessionService,
 		messageService:   messageService,
 		tenantService:    tenantService,
@@ -1662,6 +1666,40 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		}
 	}
 
+	if isFeishuPlatform(msg.Platform) {
+		// Always use Feishu's cross-application identity for 00 so direct @00
+		// turns and auto-forwarded multi-specialist turns share one context.
+		if isSummaryChannel(channel) {
+			msg = messageForSummary(msg)
+		}
+
+		if isSpecialtyChannel(channel) {
+			// When 00 is explicitly @mentioned, specialists stay silent and the
+			// normal 00 event owns the answer.
+			if messageMentionsBotCode(msg, summaryBotCode) {
+				logger.Infof(ctx, "[IM] Specialist channel %s suppressed because 00 aggregate assistant was mentioned", channelID)
+				return nil
+			}
+
+			// When two or more specialists are @mentioned without 00, every
+			// specialist event attempts the same forwarding operation. The
+			// existing summary-channel + message-ID dedup key elects exactly
+			// one request across goroutines and service instances.
+			if shouldAutoForwardToSummary(channel, msg) {
+				if summaryChannelID, found := s.summaryChannelIDFor(channel); found {
+					codes := mentionedSpecialtyBotCodes(msg)
+					logger.Infof(ctx,
+						"[IM] Auto-forwarding multi-specialist message to 00: source_channel=%s summary_channel=%s codes=%v message=%s",
+						channelID, summaryChannelID, codes, msg.MessageID)
+					return s.HandleMessage(ctx, messageForExplicitSummary(msg), summaryChannelID)
+				}
+				logger.Warnf(ctx,
+					"[IM] Multi-specialist aggregation requested but no enabled 00 channel was found; channel=%s message=%s",
+					channelID, msg.MessageID)
+			}
+		}
+	}
+
 	// Resolve threadID for key building — only include in thread mode to avoid
 	// leaking thread scope into user-mode rate limit / inflight keys.
 	threadID := ""
@@ -1748,6 +1786,21 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 			IsFinal: true,
 		})
 		return nil
+	}
+
+	var knowledgeRouting *types.KnowledgeRoutingConfig
+	if isFeishuPlatform(msg.Platform) && isSummaryChannel(channel) {
+		customAgent, knowledgeRouting, err = s.prepareSummaryRouting(sessionCtx, tenantID, msg, customAgent)
+		if err != nil {
+			logger.Errorf(ctx, "[IM] Failed to prepare 00 aggregate routing: %v", err)
+			_ = adapter.SendReply(ctx, msg, &ReplyMessage{
+				Content: "00汇总机器人暂时无法读取知识库目录，请稍后重试。",
+				IsFinal: true,
+			})
+			return nil
+		}
+		logger.Infof(ctx, "[IM] 00 aggregate routing enabled: routes=%d required=%d explicit_only=%t",
+			len(knowledgeRouting.Routes), len(knowledgeRouting.RequiredKnowledgeBaseIDs), knowledgeRouting.ExplicitOnly)
 	}
 
 	images := incomingImages(msg)
@@ -1840,6 +1893,7 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		channel:          channel,
 		channelID:        channelID,
 		knowledgeBaseIDs: append([]string(nil), channelKBIDs...),
+		knowledgeRouting: knowledgeRouting.Clone(),
 		tenant:           tenant,
 		userKey:          userKey,
 	}
@@ -1923,7 +1977,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	// If the adapter supports streaming and output is not "full", use streaming.
 	if !streamDisabled {
 		if streamer, ok := req.adapter.(StreamSender); ok {
-			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, streamer, req.adapter, req.userKey, req.tenant); err != nil {
+			if err := s.handleMessageStream(ctx, req.msg, req.session, req.agent, kbIDs, req.knowledgeRouting, streamer, req.adapter, req.userKey, req.tenant); err != nil {
 				logger.Errorf(ctx, "[IM] Stream QA failed: %v", err)
 			}
 			return
@@ -1931,7 +1985,7 @@ func (s *Service) executeQARequest(req *qaRequest) {
 	}
 
 	// Non-streaming fallback: collect full answer then send.
-	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.userKey, req.msg.Quote, req.msg.Images)
+	answer, err := s.runQA(ctx, req.session, req.msg.Content, req.agent, kbIDs, req.knowledgeRouting, req.userKey, req.msg.Quote, req.msg.Images)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA failed: %v, sending fallback reply", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
@@ -2389,12 +2443,23 @@ func briefToolSummary(output string) string {
 // handleMessageStream runs the QA pipeline and streams answer chunks to the IM platform
 // in real-time via the StreamSender interface. Chunks are batched at streamFlushInterval
 // to avoid API rate-limiting.
-func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, streamer StreamSender, adapter Adapter, userKey string, tenant *types.Tenant) error {
+func (s *Service) handleMessageStream(
+	ctx context.Context,
+	msg *IncomingMessage,
+	session *types.Session,
+	customAgent *types.CustomAgent,
+	kbIDs []string,
+	knowledgeRouting *types.KnowledgeRoutingConfig,
+	streamer StreamSender,
+	adapter Adapter,
+	userKey string,
+	tenant *types.Tenant,
+) error {
 	// Start the stream on the IM platform (e.g., create Feishu streaming card)
 	streamID, err := streamer.StartStream(ctx, msg)
 	if err != nil {
 		logger.Warnf(ctx, "[IM] StartStream failed, falling back to non-streaming: %v", err)
-		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, adapter, userKey, tenant)
+		return s.fallbackNonStream(ctx, msg, session, customAgent, kbIDs, knowledgeRouting, adapter, userKey, tenant)
 	}
 	streamFinished := false
 	defer func() {
@@ -2714,6 +2779,7 @@ func (s *Service) handleMessageStream(ctx context.Context, msg *IncomingMessage,
 			userMsg.ID,
 			customAgent,
 			kbIDs,
+			knowledgeRouting,
 			msg.Quote,
 			imageURLs,
 		)
@@ -2845,8 +2911,18 @@ loop:
 }
 
 // fallbackNonStream is used when streaming initialization fails.
-func (s *Service) fallbackNonStream(ctx context.Context, msg *IncomingMessage, session *types.Session, customAgent *types.CustomAgent, kbIDs []string, adapter Adapter, userKey string, tenant *types.Tenant) error {
-	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, userKey, msg.Quote, msg.Images)
+func (s *Service) fallbackNonStream(
+	ctx context.Context,
+	msg *IncomingMessage,
+	session *types.Session,
+	customAgent *types.CustomAgent,
+	kbIDs []string,
+	knowledgeRouting *types.KnowledgeRoutingConfig,
+	adapter Adapter,
+	userKey string,
+	tenant *types.Tenant,
+) error {
+	answer, err := s.runQA(ctx, session, msg.Content, customAgent, kbIDs, knowledgeRouting, userKey, msg.Quote, msg.Images)
 	if err != nil {
 		logger.Errorf(ctx, "[IM] QA fallback failed: %v", err)
 		answer = "抱歉，处理您的问题时出现了异常，请稍后再试。"
@@ -2875,6 +2951,7 @@ func (s *Service) runQA(
 	query string,
 	customAgent *types.CustomAgent,
 	kbIDs []string,
+	knowledgeRouting *types.KnowledgeRoutingConfig,
 	userKey string,
 	quote *QuotedMessage,
 	images []IncomingImage,
@@ -3015,6 +3092,7 @@ func (s *Service) runQA(
 			userMsg.ID,
 			customAgent,
 			kbIDs,
+			knowledgeRouting,
 			quote,
 			imageURLs,
 		)

@@ -5,6 +5,7 @@ import {
   applyStreamingTailFade,
   closeDanglingStreamingEmphasis,
   createChatMarkdownRenderer,
+  markImageCaptionParagraphs,
   markStandaloneStrongParagraphs,
   normalizeFullwidthMarkdownImageParentheses,
   normalizeLegacyImageContextMarkup,
@@ -95,6 +96,33 @@ test('renderChatMarkdown hides an unfinished fullwidth-parenthesis image while s
 
   assert.match(html, /streaming-image-loading/)
   assert.doesNotMatch(html, /resource:\/\/|（/)
+})
+
+test('renderChatMarkdown keeps an immediately following image caption compact', () => {
+  const renderer = createChatMarkdownRenderer({
+    imageRenderer: ({ href, text }) => `<img src="${href}" alt="${text}">`,
+    isValidImageUrl: (href) => href.startsWith('resource://'),
+  })
+  const html = renderChatMarkdown(
+    '![Figure 4-2](resource://AbCdEfGhIjKlMnOpQrStUv)\nFigure 4-2 translated caption.',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (value) => value,
+      streaming: false,
+    },
+  )
+
+  assert.match(
+    html,
+    /<p class="md-image-caption-pair"><img[^>]+>Figure 4-2 translated caption\.<\/p>/,
+  )
+  assert.doesNotMatch(html, /<img[^>]+>\s*<br/)
+})
+
+test('markImageCaptionParagraphs leaves standalone images unchanged', () => {
+  const html = '<p><img src="resource://image" alt="Figure"></p>'
+  assert.equal(markImageCaptionParagraphs(html), html)
 })
 
 test('normalizeLegacyImageContextMarkup converts copied image XML to Markdown', () => {

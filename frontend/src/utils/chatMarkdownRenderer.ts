@@ -449,6 +449,26 @@ export function markStandaloneStrongParagraphs(html: string): string {
   )
 }
 
+const IMAGE_CAPTION_PARAGRAPH_RE =
+  /<p>\s*(<img\b[^>]*>)\s*<br\s*\/?>\s*([\s\S]*?)<\/p>/gi
+
+/**
+ * Keep an image and the text on its immediately following Markdown line as a
+ * compact image-caption pair. With `breaks: true`, marked emits a `<br>` for
+ * that single newline; combined with the normal block-image margin it looks
+ * like a blank paragraph even though the source contains no blank line.
+ */
+export function markImageCaptionParagraphs(html: string): string {
+  if (!html || !html.includes('<img') || !html.includes('<br')) return html
+  return html.replace(
+    IMAGE_CAPTION_PARAGRAPH_RE,
+    (match: string, image: string, caption: string) => {
+      if (!caption.trim()) return match
+      return `<p class="md-image-caption-pair">${image}${caption}</p>`
+    },
+  )
+}
+
 export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMarkdownOptions): string {
   const rawText = typeof rawMarkdown === 'string' ? rawMarkdown : String(rawMarkdown || '')
   if (!rawText.trim()) return ''
@@ -491,9 +511,10 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
     async: false,
   }) as string
   const restoredHtml = restoreCitationHtmlPlaceholders(html, htmlSnippets)
+  const imageCaptionHtml = markImageCaptionParagraphs(restoredHtml)
   const citationHtml = options.collapseStandaloneCitations === false
-    ? restoredHtml
-    : collapseStandaloneCitationParagraphs(restoredHtml)
+    ? imageCaptionHtml
+    : collapseStandaloneCitationParagraphs(imageCaptionHtml)
   const tableWrappedHtml = wrapChatMarkdownTables(citationHtml)
   const strongTitleHtml = markStandaloneStrongParagraphs(tableWrappedHtml)
   const sanitized = options.sanitizeHtml(strongTitleHtml)

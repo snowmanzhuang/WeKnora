@@ -600,6 +600,13 @@
     transition: transform 0.2s ease;
   }
 
+  // The renderer tags an image followed immediately by caption text. Remove
+  // only the image's bottom margin so the caption begins directly below it;
+  // standalone images keep their normal vertical breathing room.
+  :deep(p.md-image-caption-pair > img) {
+    margin-bottom: 0;
+  }
+
   // Protected images not yet hydrated still carry the 1x1 placeholder gif.
   // Without a fixed size width:auto/height:auto collapse it to a ~1px line that
   // jumps to full size on load (reads as flicker during streaming). Give it a

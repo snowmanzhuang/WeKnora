@@ -107,6 +107,8 @@ func convertEvent(region Region, event *larkim.P2MessageReceiveV1) *im.IncomingM
 	}
 
 	msg := event.Event.Message
+	mentions := convertEventMentions(msg)
+	globalUserID := feishuGlobalUserID(event)
 
 	// Debug: log every raw receive event so we can see exactly what the platform
 	// delivers (or doesn't). This is the single chokepoint for all message
@@ -149,15 +151,68 @@ func convertEvent(region Region, event *larkim.P2MessageReceiveV1) *im.IncomingM
 
 	switch msgType {
 	case "text":
-		return convertTextEvent(region, msg, openID, chatID, chatType, messageID)
+		incoming := convertTextEvent(region, msg, openID, chatID, chatType, messageID)
+		attachEventMetadata(incoming, mentions, globalUserID)
+		return incoming
 	case "file":
-		return convertFileEvent(region, msg, openID, chatID, chatType, messageID)
+		incoming := convertFileEvent(region, msg, openID, chatID, chatType, messageID)
+		attachEventMetadata(incoming, mentions, globalUserID)
+		return incoming
 	case "image":
-		return convertImageEvent(region, msg, openID, chatID, chatType, messageID)
+		incoming := convertImageEvent(region, msg, openID, chatID, chatType, messageID)
+		attachEventMetadata(incoming, mentions, globalUserID)
+		return incoming
 	case "post":
-		return convertPostEvent(region, msg, openID, chatID, chatType, messageID)
+		incoming := convertPostEvent(region, msg, openID, chatID, chatType, messageID)
+		attachEventMetadata(incoming, mentions, globalUserID)
+		return incoming
 	default:
 		return nil
+	}
+}
+
+func feishuGlobalUserID(event *larkim.P2MessageReceiveV1) string {
+	if event == nil || event.Event == nil || event.Event.Sender == nil ||
+		event.Event.Sender.SenderId == nil {
+		return ""
+	}
+	return stableFeishuUserID(event.Event.Sender.SenderId)
+}
+
+func stableFeishuUserID(senderID *larkim.UserId) string {
+	if senderID == nil {
+		return ""
+	}
+	if senderID.UnionId != nil && strings.TrimSpace(*senderID.UnionId) != "" {
+		return strings.TrimSpace(*senderID.UnionId)
+	}
+	if senderID.UserId != nil && strings.TrimSpace(*senderID.UserId) != "" {
+		return strings.TrimSpace(*senderID.UserId)
+	}
+	return ""
+}
+
+func convertEventMentions(msg *larkim.EventMessage) []im.IncomingMention {
+	if msg == nil || len(msg.Mentions) == 0 {
+		return nil
+	}
+	mentions := make([]im.IncomingMention, 0, len(msg.Mentions))
+	for _, mention := range msg.Mentions {
+		if mention == nil {
+			continue
+		}
+		mentions = append(mentions, im.IncomingMention{
+			Key:  ptrStr(mention.Key),
+			Name: ptrStr(mention.Name),
+		})
+	}
+	return mentions
+}
+
+func attachEventMetadata(msg *im.IncomingMessage, mentions []im.IncomingMention, globalUserID string) {
+	if msg != nil {
+		msg.Mentions = append([]im.IncomingMention(nil), mentions...)
+		msg.GlobalUserID = globalUserID
 	}
 }
 
