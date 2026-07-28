@@ -121,10 +121,7 @@ func TestFeishuThreadID_ThreadedReply(t *testing.T) {
 		ParentID:  "msg-parent-1",
 	}
 
-	threadID := msg.RootID
-	if threadID == "" {
-		threadID = msg.MessageID
-	}
+	threadID := selectFeishuThreadID(msg.ThreadID, msg.RootID, msg.MessageID)
 
 	if threadID != "msg-root-1" {
 		t.Errorf("threadID = %q, want %q", threadID, "msg-root-1")
@@ -139,10 +136,7 @@ func TestFeishuThreadID_TopLevelMessage(t *testing.T) {
 		ParentID:  "",
 	}
 
-	threadID := msg.RootID
-	if threadID == "" {
-		threadID = msg.MessageID
-	}
+	threadID := selectFeishuThreadID(msg.ThreadID, msg.RootID, msg.MessageID)
 
 	if threadID != "msg-top-1" {
 		t.Errorf("threadID = %q, want %q (should use MessageID as fallback)", threadID, "msg-top-1")
@@ -158,8 +152,26 @@ func TestFeishuMessageStruct_JSONFields(t *testing.T) {
 	if msg.ParentID != "" {
 		t.Errorf("ParentID zero value = %q, want empty", msg.ParentID)
 	}
+	if msg.ThreadID != "" {
+		t.Errorf("ThreadID zero value = %q, want empty", msg.ThreadID)
+	}
 	if msg.MessageID != "" {
 		t.Errorf("MessageID zero value = %q, want empty", msg.MessageID)
+	}
+}
+
+func TestSelectFeishuThreadID_PrefersNativeTopicID(t *testing.T) {
+	got := selectFeishuThreadID("omt_topic_1", "om_root_1", "om_message_1")
+	if got != "omt_topic_1" {
+		t.Fatalf("thread ID = %q, want native topic ID", got)
+	}
+}
+
+func TestAttachEventMetadata_PreservesThreadID(t *testing.T) {
+	got := &im.IncomingMessage{}
+	attachEventMetadata(got, nil, "on_union", "omt_topic_1")
+	if got.ThreadID != "omt_topic_1" {
+		t.Fatalf("ThreadID = %q, want %q", got.ThreadID, "omt_topic_1")
 	}
 }
 

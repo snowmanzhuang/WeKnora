@@ -148,23 +148,24 @@ func convertEvent(region Region, event *larkim.P2MessageReceiveV1) *im.IncomingM
 	if msg.MessageId != nil {
 		messageID = *msg.MessageId
 	}
+	threadID := selectFeishuThreadID(ptrStr(msg.ThreadId), ptrStr(msg.RootId), messageID)
 
 	switch msgType {
 	case "text":
 		incoming := convertTextEvent(region, msg, openID, chatID, chatType, messageID)
-		attachEventMetadata(incoming, mentions, globalUserID)
+		attachEventMetadata(incoming, mentions, globalUserID, threadID)
 		return incoming
 	case "file":
 		incoming := convertFileEvent(region, msg, openID, chatID, chatType, messageID)
-		attachEventMetadata(incoming, mentions, globalUserID)
+		attachEventMetadata(incoming, mentions, globalUserID, threadID)
 		return incoming
 	case "image":
 		incoming := convertImageEvent(region, msg, openID, chatID, chatType, messageID)
-		attachEventMetadata(incoming, mentions, globalUserID)
+		attachEventMetadata(incoming, mentions, globalUserID, threadID)
 		return incoming
 	case "post":
 		incoming := convertPostEvent(region, msg, openID, chatID, chatType, messageID)
-		attachEventMetadata(incoming, mentions, globalUserID)
+		attachEventMetadata(incoming, mentions, globalUserID, threadID)
 		return incoming
 	default:
 		return nil
@@ -209,11 +210,27 @@ func convertEventMentions(msg *larkim.EventMessage) []im.IncomingMention {
 	return mentions
 }
 
-func attachEventMetadata(msg *im.IncomingMessage, mentions []im.IncomingMention, globalUserID string) {
+func attachEventMetadata(
+	msg *im.IncomingMessage,
+	mentions []im.IncomingMention,
+	globalUserID string,
+	threadID string,
+) {
 	if msg != nil {
 		msg.Mentions = append([]im.IncomingMention(nil), mentions...)
 		msg.GlobalUserID = globalUserID
+		msg.ThreadID = threadID
 	}
+}
+
+func selectFeishuThreadID(threadID, rootID, messageID string) string {
+	if value := strings.TrimSpace(threadID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(rootID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(messageID)
 }
 
 // convertTextEvent handles text message type.

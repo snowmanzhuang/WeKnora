@@ -308,6 +308,7 @@ type feishuMessage struct {
 	MessageID   string          `json:"message_id"`
 	RootID      string          `json:"root_id"`
 	ParentID    string          `json:"parent_id"`
+	ThreadID    string          `json:"thread_id"`
 	MessageType string          `json:"message_type"`
 	ChatType    string          `json:"chat_type"`
 	ChatID      string          `json:"chat_id"`
@@ -381,11 +382,10 @@ func (a *Adapter) ParseCallback(c *gin.Context) (*im.IncomingMessage, error) {
 		})
 	}
 
-	// Compute thread ID: use root_id for threaded replies, or message_id for top-level messages.
-	threadID := msg.RootID
-	if threadID == "" {
-		threadID = msg.MessageID
-	}
+	// Feishu topic-mode messages carry a stable thread_id even when root_id is
+	// empty. Prefer it so separate topics never fall back to a shared user
+	// session; retain root_id/message_id fallbacks for ordinary threaded chats.
+	threadID := selectFeishuThreadID(msg.ThreadID, msg.RootID, msg.MessageID)
 
 	// Determine chat type
 	chatType := im.ChatTypeDirect
