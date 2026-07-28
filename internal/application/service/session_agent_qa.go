@@ -74,6 +74,17 @@ func (s *sessionService) AgentQA(
 	if err != nil {
 		return err
 	}
+	if agentConfig.DifferentialSubagentsEnabled {
+		agentConfig.DifferentialCandidateHints = extractAuxiliaryDifferentialCandidateHints(
+			req.ImageDescription,
+			types.MaxDifferentialSubagents,
+		)
+		if len(agentConfig.DifferentialCandidateHints) > 0 {
+			logger.Infof(ctx,
+				"Captured %d auxiliary differential candidate hint(s) for backend continuity validation",
+				len(agentConfig.DifferentialCandidateHints))
+		}
+	}
 
 	// Set VLM model ID for tool result image analysis (runtime-only field)
 	if req.CustomAgent != nil && req.CustomAgent.Config.VLMModelID != "" {

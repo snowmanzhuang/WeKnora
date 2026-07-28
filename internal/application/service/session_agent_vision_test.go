@@ -85,3 +85,41 @@ func TestApplyAuxiliaryVisionCaptionsPreservesStoredURLs(t *testing.T) {
 	require.Contains(t, updated[1].Caption, "黄斑区隆起")
 	require.Empty(t, images[1].Caption, "the input slice must not be mutated")
 }
+
+func TestExtractAuxiliaryDifferentialCandidateHintsKeepsEveryIndependentDirection(t *testing.T) {
+	report := `【鉴别方向（仅供检索）】
+1. **候选甲（Candidate Alpha；CA）**
+   - 支持的图像征象：征象甲。
+2. **候选乙（Candidate Beta；CB）**
+   - 支持的图像征象：征象乙。
+3. **候选丙（Candidate Gamma） 或 候选丁（Candidate Delta）**
+   - 反对点：仍需验证。
+
+【无法确认之处】
+1. 无法确认时相。`
+
+	got := extractAuxiliaryDifferentialCandidateHints(report, 5)
+
+	require.Equal(t, []string{
+		"候选甲（Candidate Alpha；CA）",
+		"候选乙（Candidate Beta；CB）",
+		"候选丙（Candidate Gamma）",
+		"候选丁（Candidate Delta）",
+	}, got)
+}
+
+func TestExtractAuxiliaryDifferentialCandidateHintsDeduplicatesAndCapsAtFive(t *testing.T) {
+	report := `【鉴别方向（仅供检索）】
+1. **候选一**
+2. **候选一**
+3. **候选二**
+4. **候选三**
+5. **候选四**
+6. **候选五**
+7. **候选六**
+【无法确认之处】`
+
+	got := extractAuxiliaryDifferentialCandidateHints(report, 5)
+
+	require.Equal(t, []string{"候选一", "候选二", "候选三", "候选四", "候选五"}, got)
+}

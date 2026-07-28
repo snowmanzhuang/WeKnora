@@ -36,6 +36,8 @@ var differentialResearchTool = BaseTool{
 
 Use this tool only after reviewing the user's original image and the auxiliary VLM report and deciding on 2-5 genuine differential directions. Submit all directions in ONE call. Each isolated subagent searches and deep-reads knowledge-base evidence for exactly one direction, checks for a representative image matching the user's imaging modality, and returns a compact report. The backend runs at most five workers concurrently.
 
+Maintain candidate continuity across the turn. Every independently plausible direction surfaced by direct image review, the auxiliary VLM report, or any necessary preliminary retrieval must occupy its own candidates array item. Do not combine two diagnoses in one item. When no more than five plausible directions exist, include all of them rather than silently dropping a lower-ranked direction.
+
 For ophthalmology image questions asking "what could this be", diagnosis, or differential diagnosis, this tool replaces manually launching a separate broad retrieval chain for every candidate. Wait for all subagents, then use every suitable returned image next to its corresponding differential. If a subagent reports that no reliable image was found, state that honestly instead of inserting an unrelated image.`,
 	schema: json.RawMessage(`{
   "type": "object",
@@ -151,6 +153,7 @@ type DifferentialResearchTool struct {
 	config               *config.Config
 	eventBus             *event.EventBus
 	sessionID            string
+	candidateHints       []string
 	maxConcurrency       int
 	runCandidateFn       differentialCandidateRunner
 }
@@ -165,6 +168,7 @@ func NewDifferentialResearchTool(
 	cfg *config.Config,
 	eventBus *event.EventBus,
 	sessionID string,
+	candidateHints []string,
 	maxConcurrency int,
 ) *DifferentialResearchTool {
 	tool := &DifferentialResearchTool{
@@ -178,6 +182,7 @@ func NewDifferentialResearchTool(
 		config:               cfg,
 		eventBus:             eventBus,
 		sessionID:            sessionID,
+		candidateHints:       append([]string(nil), candidateHints...),
 		maxConcurrency:       types.NormalizeDifferentialSubagentConcurrency(maxConcurrency),
 	}
 	tool.runCandidateFn = tool.runCandidate
@@ -204,6 +209,12 @@ func (t *DifferentialResearchTool) Execute(ctx context.Context, args json.RawMes
 			return &types.ToolResult{Success: false, Error: err.Error()}, err
 		}
 	}
+	var autoAddedCandidates []string
+	input.Candidates, autoAddedCandidates = augmentDifferentialCandidates(
+		input.Candidates,
+		t.candidateHints,
+		types.MaxDifferentialSubagents,
+	)
 	t.routeDifferentialCandidates(ctx, &input)
 
 	limit := types.NormalizeDifferentialSubagentConcurrency(t.maxConcurrency)
@@ -245,15 +256,132 @@ func (t *DifferentialResearchTool) Execute(ctx context.Context, args json.RawMes
 		Success: successCount > 0,
 		Output:  output.String(),
 		Data: map[string]interface{}{
-			"display_type":    "differential_subagents",
-			"subagents":       clientResults,
-			"results":         flatResults,
-			"candidate_count": len(results),
-			"success_count":   successCount,
-			"image_count":     imageCount,
-			"max_concurrency": limit,
+			"display_type":          "differential_subagents",
+			"subagents":             clientResults,
+			"results":               flatResults,
+			"candidate_count":       len(results),
+			"success_count":         successCount,
+			"image_count":           imageCount,
+			"max_concurrency":       limit,
+			"auto_added_candidates": autoAddedCandidates,
+			"auto_added_count":      len(autoAddedCandidates),
 		},
 	}, nil
+}
+
+// augmentDifferentialCandidates closes the gap between the ordered candidate
+// ledger produced by the auxiliary vision pass and the main model's tool
+// arguments. It only fills unused worker slots and never replaces or reorders
+// the main model's choices.
+func augmentDifferentialCandidates(
+	candidates []DifferentialCandidate,
+	hints []string,
+	limit int,
+) ([]DifferentialCandidate, []string) {
+	if limit <= 0 {
+		return candidates, nil
+	}
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	merged := append([]DifferentialCandidate(nil), candidates...)
+	added := make([]string, 0, limit-len(merged))
+	for _, rawHint := range hints {
+		if len(merged) >= limit {
+			break
+		}
+		hint := strings.Trim(strings.TrimSpace(rawHint), "*_`# ")
+		if hint == "" || differentialCandidateHintCovered(merged, hint) {
+			continue
+		}
+		candidate := differentialCandidateFromHint(hint)
+		if strings.TrimSpace(candidate.Diagnosis) == "" {
+			continue
+		}
+		merged = append(merged, candidate)
+		added = append(added, candidate.Diagnosis)
+	}
+	return merged, added
+}
+
+func differentialCandidateHintCovered(candidates []DifferentialCandidate, hint string) bool {
+	hintKey := normalizeDifferentialCandidateTerm(hint)
+	if hintKey == "" {
+		return true
+	}
+	for _, candidate := range candidates {
+		terms := append([]string{candidate.Diagnosis}, candidate.Synonyms...)
+		for _, term := range terms {
+			termKey := normalizeDifferentialCandidateTerm(term)
+			if len([]rune(termKey)) < 3 {
+				continue
+			}
+			if strings.Contains(hintKey, termKey) || strings.Contains(termKey, hintKey) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func differentialCandidateFromHint(hint string) DifferentialCandidate {
+	hint = strings.Trim(strings.TrimSpace(hint), "*_`# ")
+	diagnosis := hint
+	synonyms := make([]string, 0, 4)
+	open := strings.Index(hint, "(")
+	openWidth := len("(")
+	if fullWidthOpen := strings.Index(hint, "（"); fullWidthOpen >= 0 &&
+		(open < 0 || fullWidthOpen < open) {
+		open = fullWidthOpen
+		openWidth = len("（")
+	}
+	if open > 0 {
+		close := strings.LastIndexAny(hint, ")）")
+		if close > open {
+			diagnosis = strings.TrimSpace(hint[:open])
+			inside := hint[open+openWidth : close]
+			for _, synonym := range regexp.MustCompile(`[;,；，/｜|]+`).Split(inside, -1) {
+				synonym = strings.TrimSpace(synonym)
+				if synonym != "" {
+					synonyms = append(synonyms, synonym)
+				}
+			}
+		}
+	}
+	if diagnosis != hint {
+		synonyms = append(synonyms, hint)
+	}
+	return DifferentialCandidate{
+		Diagnosis:              diagnosis,
+		Synonyms:               uniqueNonEmptyStrings(synonyms),
+		DiscriminatingFeatures: "该方向由辅助视觉候选清单提出，需独立检索验证，不得视为已确诊。",
+	}
+}
+
+func normalizeDifferentialCandidateTerm(value string) string {
+	var normalized strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			(r >= '\u4e00' && r <= '\u9fff') {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := normalizeDifferentialCandidateTerm(value)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func (t *DifferentialResearchTool) executeCandidateWithEvents(

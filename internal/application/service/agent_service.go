@@ -202,6 +202,7 @@ func (s *agentService) CreateAgentEngine(
 			s.cfg,
 			eventBus,
 			sessionID,
+			config.DifferentialCandidateHints,
 			concurrency,
 		))
 		logger.Infof(ctx,

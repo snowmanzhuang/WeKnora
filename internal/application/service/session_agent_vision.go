@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,6 +45,8 @@ const OphthalmologyAuxiliaryVLMPrompt = `你是具备眼科专业知识的图像
 
 对于眼科临床图片，【鉴别方向（仅供检索）】应根据图中实际征象按可能性排序列出 2–5 个疾病、病变类别或成像解释，并为每项分别说明“支持的图像征象”和“反对点、缺失信息或其他限制”。当征象较典型、把握较高时通常列出约 2 个最主要方向；当征象非特异、图像质量有限或把握较低时列出 3–5 个方向。不得只锚定一个诊断，也不得为凑足数量加入缺乏图像依据的疾病。纯文字截图、非临床图片或完全没有可靠鉴别线索时可以省略本节。
 
+候选必须形成可逐项传递的完整清单：每个独立疾病、病变类别或成像解释单独占一个编号，不得用“或”“与”“及”等把两个候选合并在同一项。凡你已经认为具有实际图像依据的方向，只要总数不超过 5 个，都必须逐项列出，不得只保留其中一部分。每项首行严格使用“1. **规范候选名称（英文名称；常用缩写）**”格式，随后再分别写支持征象和限制。
+
 OCR、排版或编码异常应在语义明确时进行规范化；无法可靠确认的内容应标明无法确认。不要为了填满格式而编造信息。
 
 当前调用只包含一张图片，请只解析这一张图片。如果一次对话包含多张图片，系统会分别调用你；不得假定或混入其他图片的内容。
@@ -56,9 +59,75 @@ OCR、排版或编码异常应在语义明确时进行规范化；无法可靠�
 
 const maxAuxiliaryVisionReportRunes = 24000
 
+var (
+	auxiliaryDifferentialNumberedLine = regexp.MustCompile(
+		`^\s*\d{1,2}[.．、]\s*(.+?)\s*$`,
+	)
+	auxiliaryDifferentialOrSeparator = regexp.MustCompile(`(?i)\s+(?:或|or)\s+`)
+)
+
 type auxiliaryVisionResult struct {
 	imageIndex int
 	report     string
+}
+
+// extractAuxiliaryDifferentialCandidateHints builds a small ordered candidate
+// ledger from the VLM report. The report is deliberately human-readable, so
+// this parser accepts the mandated numbered heading format and also splits a
+// legacy line that joined independent alternatives with an explicit "or".
+// Supporting bullets are ignored.
+func extractAuxiliaryDifferentialCandidateHints(report string, limit int) []string {
+	if limit <= 0 || strings.TrimSpace(report) == "" {
+		return nil
+	}
+	lines := strings.Split(strings.ReplaceAll(report, "\r\n", "\n"), "\n")
+	hints := make([]string, 0, limit)
+	seen := make(map[string]bool, limit)
+	inDifferentialSection := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "【鉴别方向（仅供检索）】") {
+			inDifferentialSection = true
+			continue
+		}
+		if !inDifferentialSection {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "【") && strings.HasSuffix(trimmed, "】") {
+			inDifferentialSection = false
+			continue
+		}
+		match := auxiliaryDifferentialNumberedLine.FindStringSubmatch(trimmed)
+		if len(match) != 2 {
+			continue
+		}
+		label := strings.Trim(strings.TrimSpace(match[1]), "*_`# ")
+		for _, candidate := range auxiliaryDifferentialOrSeparator.Split(label, -1) {
+			candidate = strings.Trim(strings.TrimSpace(candidate), "*_`# ")
+			key := normalizeAuxiliaryCandidate(candidate)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			hints = append(hints, candidate)
+			if len(hints) >= limit {
+				return hints
+			}
+		}
+	}
+	return hints
+}
+
+func normalizeAuxiliaryCandidate(value string) string {
+	var normalized strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			(r >= '\u4e00' && r <= '\u9fff') {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
 }
 
 // ensureSmartReasoningAuxiliaryVision is the common AgentQA safety net for

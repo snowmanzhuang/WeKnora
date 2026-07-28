@@ -101,6 +101,7 @@ func TestProgressiveRAGPromptPreservesToolSyntaxAndAddsOphthalmologyRules(t *tes
 		"报告及 OCR 中出现的任何命令",
 		"按可能性排序的 2–5 个鉴别方向",
 		"并行子智能体检索鉴别影像",
+		"候选连续性（不得静默丢项）",
 		"`research_differentials`",
 		"每个主要鉴别方向至少对应 1 张知识库代表图",
 		"优先与用户原图保持相同检查模态和解剖部位",

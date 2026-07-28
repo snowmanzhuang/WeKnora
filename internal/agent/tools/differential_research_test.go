@@ -205,3 +205,40 @@ func TestDifferentialResearchToolRejectsMoreThanFiveCandidates(t *testing.T) {
 	require.False(t, result.Success)
 	require.Contains(t, result.Error, "2-5")
 }
+
+func TestAugmentDifferentialCandidatesRestoresMissingHintsIntoFreeSlots(t *testing.T) {
+	candidates := []DifferentialCandidate{
+		{Diagnosis: "候选甲", Synonyms: []string{"Candidate Alpha", "CA"}},
+		{Diagnosis: "候选乙", Synonyms: []string{"Candidate Beta", "CB"}},
+		{Diagnosis: "候选丙", Synonyms: []string{"Candidate Gamma", "CG"}},
+	}
+	hints := []string{
+		"候选甲（Candidate Alpha；CA）",
+		"候选乙（Candidate Beta；CB）",
+		"候选丙（Candidate Gamma；CG）",
+		"候选丁（Candidate Delta；CD）",
+	}
+
+	got, added := augmentDifferentialCandidates(candidates, hints, 5)
+
+	require.Len(t, got, 4)
+	require.Equal(t, "候选丁", got[3].Diagnosis)
+	require.Contains(t, got[3].Synonyms, "Candidate Delta")
+	require.Contains(t, got[3].Synonyms, "CD")
+	require.Equal(t, []string{"候选丁"}, added)
+}
+
+func TestAugmentDifferentialCandidatesNeverExceedsFive(t *testing.T) {
+	candidates := []DifferentialCandidate{
+		{Diagnosis: "候选一"},
+		{Diagnosis: "候选二"},
+		{Diagnosis: "候选三"},
+		{Diagnosis: "候选四"},
+	}
+	hints := []string{"候选五", "候选六"}
+
+	got, added := augmentDifferentialCandidates(candidates, hints, 5)
+
+	require.Len(t, got, 5)
+	require.Equal(t, []string{"候选五"}, added)
+}

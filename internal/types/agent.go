@@ -77,6 +77,12 @@ type AgentConfig struct {
 	DifferentialSubagentsEnabled        bool   `json:"differential_subagents_enabled,omitempty"`
 	DifferentialSubagentModelID         string `json:"-"`
 	DifferentialSubagentsMaxConcurrency int    `json:"differential_subagents_max_concurrency,omitempty"`
+	// DifferentialCandidateHints is the ordered, request-scoped candidate
+	// ledger extracted from the auxiliary vision report. It is never persisted
+	// or exposed to clients. The differential tool uses it as a safety net so
+	// a plausible direction cannot silently disappear while fewer than five
+	// workers are scheduled.
+	DifferentialCandidateHints []string `json:"-"`
 }
 
 // CitationsEnabled preserves citation output for legacy runtime configs that
