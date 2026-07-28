@@ -39,7 +39,9 @@ temp/
 # 本地构建产物 / 二进制
 WeKnora
 WeKnora-lite
+/WeKnora-*
 docreader/WeKnora-feishu-caption-spacing
+/cli/weknora.exe
 /server
 /dist/
 /build/
