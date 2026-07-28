@@ -69,6 +69,7 @@ builtin_agents:
       agent_mode: "smart-reasoning"
       agent_type: "rag-qa"
       system_prompt: ""
+      system_prompt_id: "progressive_rag_agent"
       temperature: 0.7
       max_completion_tokens: 2048
       max_iterations: 50
@@ -85,6 +86,7 @@ builtin_agents:
       reflection_enabled: false
       multi_turn_enabled: true
       history_turns: 5
+      auxiliary_vlm_preanalysis_enabled: false
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2

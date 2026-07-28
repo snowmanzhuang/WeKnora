@@ -169,6 +169,12 @@ type CustomAgentConfig struct {
 	ImageUploadEnabled bool `yaml:"image_upload_enabled" json:"image_upload_enabled"`
 	// VLM model ID for image analysis (optional, falls back to workspace-level VLM)
 	VLMModelID string `yaml:"vlm_model_id" json:"vlm_model_id"`
+	// AuxiliaryVLMPreanalysisEnabled asks the configured VLM to produce an
+	// ophthalmology-focused, explicitly untrusted observation report before a
+	// vision-capable smart-reasoning model starts its ReAct loop. The main
+	// model still receives the original images and must inspect them itself.
+	// This setting is intentionally ignored by quick-answer agents.
+	AuxiliaryVLMPreanalysisEnabled bool `yaml:"auxiliary_vlm_preanalysis_enabled" json:"auxiliary_vlm_preanalysis_enabled"`
 	// Whether audio upload (ASR transcription) is enabled for this agent (default: false)
 	AudioUploadEnabled bool `yaml:"audio_upload_enabled" json:"audio_upload_enabled"`
 	// ASR model ID for audio transcription (optional)

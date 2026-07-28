@@ -1039,12 +1039,53 @@ func (h *Handler) runVLMAnalysisIfNeeded(streamCtx *sseStreamContext, reqCtx *qa
 	})
 
 	vlmStart := time.Now()
-	h.analyzeImageAttachments(streamCtx.asyncCtx, reqCtx.images,
-		reqCtx.customAgent.Config.VLMModelID, reqCtx.query)
+	auxiliaryPreanalysis := mode == qaModeAgent &&
+		reqCtx.customAgent.Config.AgentMode == types.AgentModeSmartReasoning &&
+		reqCtx.customAgent.Config.AuxiliaryVLMPreanalysisEnabled
+	analyzedCount := 0
+	if auxiliaryPreanalysis {
+		analyzedCount = h.analyzeOphthalmologyImageAttachments(
+			streamCtx.asyncCtx,
+			reqCtx.images,
+			reqCtx.customAgent.Config.VLMModelID,
+		)
+	} else {
+		analyzedCount = h.analyzeImageAttachments(
+			streamCtx.asyncCtx,
+			reqCtx.images,
+			reqCtx.customAgent.Config.VLMModelID,
+			reqCtx.query,
+		)
+	}
+
+	// Persist generated captions so follow-up turns can reconstruct the image
+	// context from the canonical messages.images column. Failure only degrades
+	// history quality and must never abort the current answer.
+	if analyzedCount > 0 && reqCtx.userMessageID != "" {
+		updateCtx := context.WithValue(
+			context.WithoutCancel(streamCtx.asyncCtx),
+			types.TenantIDContextKey,
+			reqCtx.session.TenantID,
+		)
+		if err := h.messageService.UpdateMessageImages(
+			updateCtx,
+			reqCtx.sessionID,
+			reqCtx.userMessageID,
+			convertImageAttachments(reqCtx.images),
+		); err != nil {
+			logger.Warnf(updateCtx, "persist image captions: update user message %s failed: %v",
+				reqCtx.userMessageID, err)
+		}
+	}
 
 	outputMsg := "已分析图片内容"
 	if mode == qaModeAgent {
 		outputMsg = "已查看图片内容"
+	}
+	if auxiliaryPreanalysis && analyzedCount > 0 {
+		outputMsg = "辅助视觉模型已生成眼科图像解析报告"
+	} else if analyzedCount == 0 {
+		outputMsg = "辅助视觉解析未生成结果，将继续使用主模型处理"
 	}
 	streamCtx.eventBus.Emit(streamCtx.asyncCtx, event.Event{
 		Type:      event.EventAgentToolResult,
@@ -1053,7 +1094,7 @@ func (h *Handler) runVLMAnalysisIfNeeded(streamCtx *sseStreamContext, reqCtx *qa
 			ToolCallID: toolCallID,
 			ToolName:   "image_analysis",
 			Output:     outputMsg,
-			Success:    true,
+			Success:    analyzedCount > 0,
 			Duration:   time.Since(vlmStart).Milliseconds(),
 			Iteration:  iteration,
 		},

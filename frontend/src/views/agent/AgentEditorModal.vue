@@ -756,6 +756,21 @@
                       </div>
                     </div>
 
+                    <!-- 智能推理专用：辅助 VLM 先解析，主模型继续直接读取原图 -->
+                    <div v-if="isAgentMode && formData.config.image_upload_enabled" class="setting-row">
+                      <div class="setting-info">
+                        <label>{{ $t('agentEditor.imageUpload.auxiliaryPreanalysisLabel') }}</label>
+                        <p class="desc">{{ $t('agentEditor.imageUpload.auxiliaryPreanalysisDesc') }}</p>
+                      </div>
+                      <div class="setting-control" style="flex-direction: column; align-items: flex-end;">
+                        <t-switch v-model="formData.config.auxiliary_vlm_preanalysis_enabled"
+                          :disabled="!primaryModelSupportsVision" />
+                        <p v-if="!primaryModelSupportsVision" class="field-hint field-hint--warning">
+                          {{ $t('agentEditor.imageUpload.auxiliaryPreanalysisVisionRequired') }}
+                        </p>
+                      </div>
+                    </div>
+
                     <!-- 附件图片理解 / 扫描件 OCR（图片上传启用时） -->
                     <div v-if="formData.config.image_upload_enabled" class="setting-row">
                       <div class="setting-info">
@@ -2332,6 +2347,7 @@ const defaultFormData = {
     // 附件上传设置
     image_upload_enabled: false,
     vlm_model_id: '',
+    auxiliary_vlm_preanalysis_enabled: false,
     image_storage_provider: '',
     // 附件图片理解 / 扫描件 OCR 开关（默认关闭，避免解析耗时增加）
     attachment_image_understanding: false,
@@ -2445,6 +2461,10 @@ const agentMode = computed({
 });
 
 const isAgentMode = computed(() => agentMode.value === 'smart-reasoning');
+const primaryModelSupportsVision = computed(() => {
+  const selected = allModels.value.find((model) => model.id === formData.value.config.model_id);
+  return selected?.parameters?.supports_vision === true;
+});
 
 const currentIntentTemplate = computed(() =>
   intentPromptTemplates.value.find((template) => template.id === selectedIntent.value),
@@ -4276,6 +4296,15 @@ const handleSave = async () => {
     currentSection.value = 'multimodal';
     return;
   }
+  if (
+    isAgentMode.value
+    && formData.value.config.auxiliary_vlm_preanalysis_enabled
+    && !primaryModelSupportsVision.value
+  ) {
+    MessagePlugin.error(t('agentEditor.imageUpload.auxiliaryPreanalysisVisionRequired'));
+    currentSection.value = 'multimodal';
+    return;
+  }
 
   // ReRank 模型按运行范围按需使用：知识库范围为 none，或未启用
   // knowledge_search 时不需要；其余情况由对话入口在使用前给出明确提示。
@@ -4832,6 +4861,19 @@ const handleSave = async () => {
   :deep(.t-input-number) {
     width: 120px;
   }
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+  color: var(--td-text-color-secondary);
+}
+
+.field-hint--warning {
+  color: var(--td-warning-color);
 }
 
 .integration-inline {

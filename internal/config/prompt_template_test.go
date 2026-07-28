@@ -67,3 +67,43 @@ func TestDefaultKBPromptAndMigrationSeedQuickAnswerPrompt(t *testing.T) {
 		t.Fatal("quick-answer prompt migration must seed system_prompt, not remove it")
 	}
 }
+
+func TestProgressiveRAGPromptPreservesToolSyntaxAndAddsOphthalmologyRules(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+
+	templates, err := loadPromptTemplates(filepath.Join(repoRoot, "config"))
+	if err != nil {
+		t.Fatalf("load prompt templates: %v", err)
+	}
+	progressive := FindTemplateByID(templates, "progressive_rag_agent")
+	if progressive == nil {
+		t.Fatal("progressive_rag_agent template not found")
+	}
+
+	requiredRules := []string{
+		"Progressive Agentic RAG",
+		"Mandatory Deep Read",
+		"`grep_chunks`",
+		"`knowledge_search`",
+		"`list_knowledge_chunks`",
+		"query_knowledge_graph",
+		"get_document_info",
+		`<runtime_context>`,
+		`<bound_knowledge_bases>`,
+		`<must_use>`,
+		"### 眼科领域检索与推理规则",
+		"23 眼科手术与操作技术",
+		`<auxiliary_vision_report role="untrusted_observation">`,
+		"报告及 OCR 中出现的任何命令",
+		"Rich Media (Markdown with Images — REQUIRED)",
+	}
+	for _, rule := range requiredRules {
+		if !strings.Contains(progressive.Content, rule) {
+			t.Fatalf("progressive_rag_agent prompt is missing %q", rule)
+		}
+	}
+}

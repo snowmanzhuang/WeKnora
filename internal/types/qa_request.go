@@ -47,7 +47,7 @@ type QARequest struct {
 	MCPServiceIDs      []string                // Per-request MCP service IDs from @mentions
 	SkillNames         []string                // Per-request preloaded skill names from @mentions
 	ImageURLs          []string                // Image URLs for multimodal input
-	ImageDescription   string                  // VLM-generated image description (fallback for non-vision models)
+	ImageDescription   string                  // VLM report: non-vision fallback or smart-agent auxiliary observation
 	UserMessageID      string                  // Created user message ID
 	WebSearchEnabled   bool                    // Whether web search is enabled for this request
 	QuotedContext      string                  // Quoted message content from IM quote-reply (appended at LLM prompt stage, not used for retrieval)

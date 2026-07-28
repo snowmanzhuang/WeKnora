@@ -181,6 +181,16 @@ func (s *sessionService) AgentQA(
 	if agentModelSupportsVision && len(req.ImageURLs) > 0 {
 		agentImageURLs = req.ImageURLs
 		logger.Infof(ctx, "Agent model supports vision, passing %d image(s) directly", len(agentImageURLs))
+		if req.CustomAgent.Config.AgentMode == types.AgentModeSmartReasoning &&
+			req.CustomAgent.Config.AuxiliaryVLMPreanalysisEnabled {
+			if auxiliaryContext := buildAuxiliaryVisionRuntimeContext(req.ImageDescription); auxiliaryContext != "" {
+				agentQuery += auxiliaryContext
+				logger.Infof(ctx, "Appended untrusted auxiliary VLM report to smart-reasoning query (%d chars)",
+					len(req.ImageDescription))
+			} else {
+				logger.Warnf(ctx, "Auxiliary VLM pre-analysis enabled but no report was produced; continuing with original images")
+			}
+		}
 	} else if req.ImageDescription != "" {
 		agentQuery = req.Query + "\n\n[用户上传图片内容]\n" + req.ImageDescription
 		logger.Infof(ctx, "Agent model does not support vision, appending image description (%d chars)", len(req.ImageDescription))
