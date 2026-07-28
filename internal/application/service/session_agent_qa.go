@@ -62,6 +62,13 @@ func (s *sessionService) AgentQA(
 	// Ensure defaults are set
 	req.CustomAgent.EnsureDefaults()
 
+	// The web handler normally generates ImageDescription before calling
+	// AgentQA. IM and other direct service callers bypass that handler, so run
+	// the same independent auxiliary VLM pre-analysis here when the report is
+	// still missing. This completes before the main model receives the raw
+	// image and is a no-op when a report already exists.
+	s.ensureSmartReasoningAuxiliaryVision(ctx, req, eventBus)
+
 	// Build AgentConfig from custom agent and tenant info
 	agentConfig, err := s.buildAgentConfig(ctx, req, tenantInfo, agentTenantID)
 	if err != nil {
