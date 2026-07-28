@@ -44,6 +44,7 @@ web/
 **/__pycache__
 /scripts/scale_dev_jobs.sh
 /server
+docreader/WeKnora-feishu-caption-spacing
 frontend/.vite
 frontend/chrome-extension/
 WeKnora-Chrome-Extension
