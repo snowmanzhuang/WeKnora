@@ -9,8 +9,9 @@ import (
 
 // persistStripFields lists bulky Data keys to drop before SSE replay / DB storage.
 var persistStripFields = map[string][]string{
-	"knowledge_chunks_list": {"chunks"},
-	"grep_results":          {"chunk_results"},
+	"knowledge_chunks_list":  {"chunks"},
+	"grep_results":           {"chunk_results"},
+	"differential_subagents": {"results"},
 }
 
 // ShouldOmitRawToolOutput reports whether the raw XML/text Output should be
@@ -164,6 +165,14 @@ func compactToolSummary(success bool, errMsg string, data map[string]interface{}
 		if parsed > 0 {
 			return fmt.Sprintf("Parsed %d attachment(s)", parsed)
 		}
+	case "differential_subagents":
+		candidates := intField(data, "candidate_count")
+		completed := intField(data, "success_count")
+		images := intField(data, "image_count")
+		return fmt.Sprintf(
+			"Completed %d/%d differential research subagent(s); %d reference image(s) selected (details omitted from history)",
+			completed, candidates, images,
+		)
 	}
 	if displayType := stringField(data, "display_type"); displayType != "" {
 		return fmt.Sprintf("Tool completed (%s; payload omitted from history)", displayType)

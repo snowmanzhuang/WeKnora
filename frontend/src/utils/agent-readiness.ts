@@ -30,9 +30,13 @@ export function agentHasConfiguredChatModel(
  * older agent configuration still contains knowledge_search in allowed_tools.
  */
 export function agentRequiresRerankModel(
-  config: Pick<CustomAgentConfig, 'kb_selection_mode' | 'allowed_tools'> | undefined,
+  config: Pick<
+    CustomAgentConfig,
+    'kb_selection_mode' | 'allowed_tools' | 'differential_subagents_enabled'
+  > | undefined,
 ): boolean {
   if (!config || config.kb_selection_mode === 'none') return false
+  if (config.differential_subagents_enabled) return true
 
   const allowedTools = config.allowed_tools || []
   // The backend falls back to DefaultAllowedTools when the list is empty,
@@ -45,7 +49,8 @@ export function agentRequiresRerankModel(
 export function getAgentNotReadyReasonKeys(
   config: Pick<
     CustomAgentConfig,
-    'model_id' | 'rerank_model_id' | 'kb_selection_mode' | 'allowed_tools' | 'agent_mode'
+    'model_id' | 'rerank_model_id' | 'kb_selection_mode' | 'allowed_tools' |
+    'agent_mode' | 'differential_subagents_enabled'
   > | undefined,
   models: Pick<ModelConfig, 'id' | 'type'>[],
   options: { isAgentMode: boolean; isSharedAgent: boolean },

@@ -175,6 +175,19 @@ type CustomAgentConfig struct {
 	// model still receives the original images and must inspect them itself.
 	// This setting is intentionally ignored by quick-answer agents.
 	AuxiliaryVLMPreanalysisEnabled bool `yaml:"auxiliary_vlm_preanalysis_enabled" json:"auxiliary_vlm_preanalysis_enabled"`
+	// DifferentialSubagentsEnabled enables a bounded fan-out/fan-in workflow
+	// for ophthalmology image differential questions. The main agent supplies
+	// 2-5 candidate directions; isolated retrieval workers research each
+	// direction concurrently and return compact evidence plus at most one image.
+	// This setting is intentionally ignored by quick-answer agents.
+	DifferentialSubagentsEnabled bool `yaml:"differential_subagents_enabled" json:"differential_subagents_enabled"`
+	// DifferentialSubagentModelID is the optional chat model used to summarize
+	// each worker's independently retrieved evidence. Empty reuses the main
+	// agent model.
+	DifferentialSubagentModelID string `yaml:"differential_subagent_model_id" json:"differential_subagent_model_id,omitempty"`
+	// DifferentialSubagentsMaxConcurrency controls worker fan-out. Runtime
+	// normalization always clamps this to [1, MaxDifferentialSubagents].
+	DifferentialSubagentsMaxConcurrency int `yaml:"differential_subagents_max_concurrency" json:"differential_subagents_max_concurrency,omitempty"`
 	// Whether audio upload (ASR transcription) is enabled for this agent (default: false)
 	AudioUploadEnabled bool `yaml:"audio_upload_enabled" json:"audio_upload_enabled"`
 	// ASR model ID for audio transcription (optional)
@@ -522,6 +535,11 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.AgentMode == AgentModeSmartReasoning {
 		a.Config.MultiTurnEnabled = true
 	}
+	if a.Config.DifferentialSubagentsEnabled {
+		a.Config.DifferentialSubagentsMaxConcurrency = NormalizeDifferentialSubagentConcurrency(
+			a.Config.DifferentialSubagentsMaxConcurrency,
+		)
+	}
 	// Pin thinking to an explicit false when unset so provider-specific wire
 	// formats (e.g. thinking_control=thinking_type) always receive a value.
 	if a.Config.Thinking == nil {
@@ -534,6 +552,24 @@ func (a *CustomAgent) EnsureDefaults() {
 		enabled := true
 		a.Config.CitationEnabled = &enabled
 	}
+}
+
+const (
+	// MaxDifferentialSubagents is a hard backend limit. It bounds outbound
+	// model/retrieval concurrency regardless of values supplied by the UI/API.
+	MaxDifferentialSubagents               = 5
+	defaultDifferentialSubagentConcurrency = 3
+)
+
+// NormalizeDifferentialSubagentConcurrency returns a safe worker limit.
+func NormalizeDifferentialSubagentConcurrency(value int) int {
+	if value <= 0 {
+		return defaultDifferentialSubagentConcurrency
+	}
+	if value > MaxDifferentialSubagents {
+		return MaxDifferentialSubagents
+	}
+	return value
 }
 
 // IsAgentMode returns true if this agent uses ReAct agent mode

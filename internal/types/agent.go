@@ -72,6 +72,11 @@ type AgentConfig struct {
 	// Whether to execute independent tool calls in parallel (default: false).
 	// When enabled and the LLM returns multiple tool calls, they run concurrently via errgroup.
 	ParallelToolCalls bool `json:"parallel_tool_calls,omitempty"`
+
+	// Ophthalmology differential-research fan-out (smart-reasoning only).
+	DifferentialSubagentsEnabled        bool   `json:"differential_subagents_enabled,omitempty"`
+	DifferentialSubagentModelID         string `json:"-"`
+	DifferentialSubagentsMaxConcurrency int    `json:"differential_subagents_max_concurrency,omitempty"`
 }
 
 // CitationsEnabled preserves citation output for legacy runtime configs that

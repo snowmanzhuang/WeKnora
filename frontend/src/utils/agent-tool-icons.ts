@@ -33,6 +33,9 @@ export function getAgentToolIconName(
   if (toolName === 'image_analysis' || toolName === 'query_understand') {
     return 'ai-search'
   }
+  if (toolName === 'research_differentials' || toolName === 'differential_subagent') {
+    return 'git-branch'
+  }
   if (toolName === 'attachment_parsing') {
     return 'attach'
   }

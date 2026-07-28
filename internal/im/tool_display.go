@@ -45,6 +45,8 @@ var imToolNameLabels = map[string]string{
 	"knowledge_graph_extract": "知识图谱抽取",
 	"thinking":                "思考",
 	"image_analysis":          "查看图片内容",
+	"research_differentials":  "并行研究鉴别诊断",
+	"differential_subagent":   "鉴别诊断检索子智能体",
 	"query_understand":        "理解问题",
 	"query_knowledge_graph":   "知识图谱查询",
 	"read_skill":              "读取技能",
@@ -306,6 +308,23 @@ func imAgentToolTitle(step IMToolStep) string {
 		switch step.ToolName {
 		case "image_analysis":
 			return "正在查看图片内容..."
+		case "research_differentials":
+			count := 0
+			if step.Arguments != nil {
+				if candidates, ok := step.Arguments["candidates"].([]any); ok {
+					count = len(candidates)
+				}
+			}
+			if count > 0 {
+				return fmt.Sprintf("正在并行检索 %d 个鉴别方向...", count)
+			}
+			return "正在并行检索鉴别方向..."
+		case "differential_subagent":
+			diagnosis, _ := step.Arguments["diagnosis"].(string)
+			if diagnosis = strings.TrimSpace(diagnosis); diagnosis != "" {
+				return fmt.Sprintf("正在检索鉴别方向：%s...", diagnosis)
+			}
+			return "正在检索鉴别方向..."
 		case "wiki_search", "wiki_read_page":
 			return imLocalizedToolName(step.ToolName) + "..."
 		default:
@@ -408,6 +427,27 @@ func imToolStatusDescription(step IMToolStep) string {
 			return "已查看图片内容"
 		}
 		return "图片内容查看失败"
+	case "research_differentials":
+		if success {
+			return "已完成并行鉴别检索"
+		}
+		return "并行鉴别检索失败"
+	case "differential_subagent":
+		diagnosis := ""
+		if step.Data != nil {
+			diagnosis, _ = step.Data["diagnosis"].(string)
+		}
+		if diagnosis == "" && step.Arguments != nil {
+			diagnosis, _ = step.Arguments["diagnosis"].(string)
+		}
+		diagnosis = strings.TrimSpace(diagnosis)
+		if diagnosis == "" {
+			diagnosis = "该鉴别方向"
+		}
+		if success {
+			return fmt.Sprintf("%s：检索完成", diagnosis)
+		}
+		return fmt.Sprintf("%s：检索失败", diagnosis)
 	case "query_understand":
 		if success {
 			return "已完成问题理解"
@@ -470,9 +510,25 @@ func imToolResultSummary(step IMToolStep) string {
 		return imGrepSearchSummary(step.Data)
 	case "list_knowledge_chunks":
 		return imKnowledgeChunksSummary(step.Data)
+	case "research_differentials":
+		completed := imIntField(step.Data, "success_count")
+		total := imIntField(step.Data, "candidate_count")
+		images := imIntField(step.Data, "image_count")
+		return fmt.Sprintf("完成 %d/%d 项，找到 %d 张参考图", completed, total, images)
+	case "differential_subagent":
+		status, _ := step.Data["status"].(string)
+		switch status {
+		case "completed":
+			return "已找到证据与可靠配图"
+		case "no_image":
+			return "已找到证据，暂无可靠配图"
+		case "no_match":
+			return "未找到足够相关证据"
+		}
 	default:
 		return briefToolSummary(step.Output)
 	}
+	return ""
 }
 
 const (

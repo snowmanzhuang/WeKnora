@@ -54,6 +54,15 @@ func TestAgentRequiresRerankModel(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "differential subagents use reranker",
+			agent: &types.CustomAgent{Config: types.CustomAgentConfig{
+				KBSelectionMode:              "all",
+				AllowedTools:                 []string{"wiki_search"},
+				DifferentialSubagentsEnabled: true,
+			}},
+			want: true,
+		},
+		{
 			name:  "nil agent",
 			agent: nil,
 			want:  false,

@@ -771,6 +771,49 @@
                       </div>
                     </div>
 
+                    <!-- 智能推理专用：按鉴别方向并发运行隔离检索子智能体 -->
+                    <div v-if="isAgentMode && formData.config.image_upload_enabled"
+                      class="subagent-control-module">
+                      <div class="setting-row subagent-control-module__header">
+                        <div class="setting-info">
+                          <label>{{ $t('agentEditor.imageUpload.differentialSubagentsLabel') }}</label>
+                          <p class="desc">{{ $t('agentEditor.imageUpload.differentialSubagentsDesc') }}</p>
+                        </div>
+                        <div class="setting-control">
+                          <t-switch v-model="formData.config.differential_subagents_enabled" />
+                        </div>
+                      </div>
+
+                      <template v-if="formData.config.differential_subagents_enabled">
+                        <div class="setting-row subagent-control-module__child">
+                          <div class="setting-info">
+                            <label>{{ $t('agentEditor.imageUpload.differentialSubagentModel') }}</label>
+                            <p class="desc">{{ $t('agentEditor.imageUpload.differentialSubagentModelDesc') }}</p>
+                          </div>
+                          <div class="setting-control">
+                            <ModelSelector model-type="KnowledgeQA"
+                              :selected-model-id="formData.config.differential_subagent_model_id"
+                              :all-models="allModels"
+                              @update:selected-model-id="(val: string) => formData.config.differential_subagent_model_id = val"
+                              @add-model="handleAddModel('llm')"
+                              :placeholder="$t('agentEditor.imageUpload.differentialSubagentModelPlaceholder')" />
+                          </div>
+                        </div>
+
+                        <div class="setting-row subagent-control-module__child">
+                          <div class="setting-info">
+                            <label>{{ $t('agentEditor.imageUpload.differentialSubagentConcurrency') }}</label>
+                            <p class="desc">{{ $t('agentEditor.imageUpload.differentialSubagentConcurrencyDesc') }}</p>
+                          </div>
+                          <div class="setting-control">
+                            <t-input-number
+                              v-model="formData.config.differential_subagents_max_concurrency"
+                              :min="1" :max="5" :step="1" theme="column" />
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+
                     <!-- 附件图片理解 / 扫描件 OCR（图片上传启用时） -->
                     <div v-if="formData.config.image_upload_enabled" class="setting-row">
                       <div class="setting-info">
@@ -2348,6 +2391,9 @@ const defaultFormData = {
     image_upload_enabled: false,
     vlm_model_id: '',
     auxiliary_vlm_preanalysis_enabled: false,
+    differential_subagents_enabled: false,
+    differential_subagent_model_id: '',
+    differential_subagents_max_concurrency: 3,
     image_storage_provider: '',
     // 附件图片理解 / 扫描件 OCR 开关（默认关闭，避免解析耗时增加）
     attachment_image_understanding: false,
@@ -4305,6 +4351,11 @@ const handleSave = async () => {
     currentSection.value = 'multimodal';
     return;
   }
+  if (isAgentMode.value && formData.value.config.differential_subagents_enabled) {
+    const requestedConcurrency = Number(formData.value.config.differential_subagents_max_concurrency || 3);
+    formData.value.config.differential_subagents_max_concurrency =
+      Math.min(5, Math.max(1, Math.trunc(requestedConcurrency)));
+  }
 
   // ReRank 模型按运行范围按需使用：知识库范围为 none，或未启用
   // knowledge_search 时不需要；其余情况由对话入口在使用前给出明确提示。
@@ -4682,6 +4733,33 @@ const handleSave = async () => {
   display: flex;
   flex-direction: column;
   gap: 0;
+}
+
+.subagent-control-module {
+  margin: 12px 0;
+  padding: 0 16px;
+  border: 1px solid var(--td-component-stroke);
+  border-radius: 10px;
+  background: var(--td-bg-color-container-hover);
+
+  &__header {
+    .setting-info label {
+      font-weight: 600;
+    }
+  }
+
+  &__child {
+    padding-left: 16px;
+
+    &::before {
+      content: '';
+      align-self: stretch;
+      width: 2px;
+      margin-right: -10px;
+      border-radius: 2px;
+      background: var(--td-brand-color-light);
+    }
+  }
 }
 
 .parser-policy-block {

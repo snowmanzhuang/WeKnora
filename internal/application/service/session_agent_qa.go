@@ -263,6 +263,12 @@ func (s *sessionService) buildAgentConfig(
 		LLMCallTimeout:              customAgent.Config.LLMCallTimeout,
 		RetainRetrievalHistory:      customAgent.Config.RetainRetrievalHistory,
 		FallbackModelID:             customAgent.Config.FallbackModelID,
+		DifferentialSubagentsEnabled: customAgent.Config.AgentMode == types.AgentModeSmartReasoning &&
+			customAgent.Config.DifferentialSubagentsEnabled,
+		DifferentialSubagentModelID: customAgent.Config.DifferentialSubagentModelID,
+		DifferentialSubagentsMaxConcurrency: types.NormalizeDifferentialSubagentConcurrency(
+			customAgent.Config.DifferentialSubagentsMaxConcurrency,
+		),
 	}
 
 	// Falls back to global configuration if no specific timeout is set for the agent.

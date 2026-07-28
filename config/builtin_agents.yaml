@@ -87,6 +87,9 @@ builtin_agents:
       multi_turn_enabled: true
       history_turns: 5
       auxiliary_vlm_preanalysis_enabled: false
+      differential_subagents_enabled: true
+      differential_subagent_model_id: ""
+      differential_subagents_max_concurrency: 5
       faq_priority_enabled: true
       faq_direct_answer_threshold: 0.9
       faq_score_boost: 1.2

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/agent"
 	"github.com/Tencent/WeKnora/internal/agent/approval"
@@ -174,6 +175,38 @@ func (s *agentService) CreateAgentEngine(
 	}
 	if err := s.registerTools(ctx, toolRegistry, config, rerankModel, chatModel, sessionID); err != nil {
 		return nil, fmt.Errorf("failed to register tools: %w", err)
+	}
+	if config.DifferentialSubagentsEnabled && agentHasKnowledgeScope(config) {
+		workerModel := chatModel
+		if modelID := strings.TrimSpace(config.DifferentialSubagentModelID); modelID != "" &&
+			modelID != chatModel.GetModelID() {
+			resolved, modelErr := s.modelService.GetChatModel(ctx, modelID)
+			if modelErr != nil {
+				logger.Warnf(ctx,
+					"Failed to initialize differential subagent model %s; reusing main model: %v",
+					modelID, modelErr)
+			} else {
+				workerModel = resolved
+			}
+		}
+		concurrency := types.NormalizeDifferentialSubagentConcurrency(
+			config.DifferentialSubagentsMaxConcurrency,
+		)
+		toolRegistry.RegisterTool(tools.NewDifferentialResearchTool(
+			s.knowledgeBaseService,
+			s.knowledgeService,
+			s.chunkService,
+			config.SearchTargets,
+			rerankModel,
+			workerModel,
+			s.cfg,
+			eventBus,
+			sessionID,
+			concurrency,
+		))
+		logger.Infof(ctx,
+			"Registered differential research subagents: model=%s max_concurrency=%d",
+			workerModel.GetModelID(), concurrency)
 	}
 	s.registerMCPTools(ctx, toolRegistry, config, eventBus, sessionID, assistantMessageID)
 
@@ -693,6 +726,9 @@ func (s *agentService) ValidateConfig(config *types.AgentConfig) error {
 	if config.MaxIterations > MAX_ITERATIONS {
 		return fmt.Errorf("max iterations too high: %d (max %d)", config.MaxIterations, MAX_ITERATIONS)
 	}
+	config.DifferentialSubagentsMaxConcurrency = types.NormalizeDifferentialSubagentConcurrency(
+		config.DifferentialSubagentsMaxConcurrency,
+	)
 
 	return nil
 }

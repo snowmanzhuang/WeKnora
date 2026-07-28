@@ -44,6 +44,9 @@ func agentRequiresRerankModel(agent *types.CustomAgent) bool {
 	if agent.Config.KBSelectionMode == "none" {
 		return false
 	}
+	if agent.Config.DifferentialSubagentsEnabled {
+		return true
+	}
 	allowed := agent.Config.AllowedTools
 	if len(allowed) == 0 {
 		allowed = tools.DefaultAllowedTools()

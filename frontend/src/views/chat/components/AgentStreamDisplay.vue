@@ -103,7 +103,9 @@
                 <div class="action-card" :class="{
                   'action-pending': event.pending,
                   'action-error': event.success === false,
-                  'reference-trigger': canOpenToolReferences(event)
+                  'reference-trigger': canOpenToolReferences(event),
+                  'action-subagent-parent': event.tool_name === 'research_differentials',
+                  'action-subagent-child': event.tool_name === 'differential_subagent'
                 }"
                   :role="canOpenToolReferences(event) ? 'button' : undefined"
                   :tabindex="canOpenToolReferences(event) ? 0 : undefined"
@@ -326,7 +328,9 @@
               <div class="action-card" :class="{
                 'action-pending': event.pending,
                 'action-error': event.success === false,
-                'reference-trigger': canOpenToolReferences(event)
+                'reference-trigger': canOpenToolReferences(event),
+                'action-subagent-parent': event.tool_name === 'research_differentials',
+                'action-subagent-child': event.tool_name === 'differential_subagent'
               }"
                 :role="canOpenToolReferences(event) ? 'button' : undefined"
                 :tabindex="canOpenToolReferences(event) ? 0 : undefined"
@@ -552,6 +556,8 @@ const TOOL_NAME_KEYS: Record<string, string> = {
   thinking: 'agentStream.tools.thinking',
   attachment_parsing: 'agentStream.tools.attachmentParsing',
   image_analysis: 'agentStream.tools.imageAnalysis',
+  research_differentials: 'agentStream.tools.researchDifferentials',
+  differential_subagent: 'agentStream.tools.differentialSubagent',
   query_understand: 'agentStream.tools.queryUnderstand',
   query_knowledge_graph: 'agentStream.tools.queryKnowledgeGraph',
   read_skill: 'agentStream.tools.readSkill',
@@ -1492,6 +1498,9 @@ const getThinkingSummary = (event: any): string => {
 // Helper: build the full result list with plan_task_change injections and thinking merging
 const buildFullEventList = (stream: any[]) => {
   const validStream = stream.filter((e: any) => e && typeof e === 'object' && e.type);
+  const hasDifferentialChildEvents = validStream.some(
+    (e: any) => e.type === 'tool_call' && e.tool_name === 'differential_subagent'
+  );
   let lastTask: string | null = null;
   const result: any[] = [];
 
@@ -1550,6 +1559,35 @@ const buildFullEventList = (stream: any[]) => {
     }
 
     result.push(event);
+    // Live runs emit one child tool event per differential direction. Persisted
+    // agent_steps contain the compact parent result only, so recreate completed
+    // child rows from its structured payload after refresh.
+    if (
+      !hasDifferentialChildEvents &&
+      event.type === 'tool_call' &&
+      event.tool_name === 'research_differentials' &&
+      !event.pending &&
+      Array.isArray(event.tool_data?.subagents)
+    ) {
+      event.tool_data.subagents.forEach((subagent: any, subIndex: number) => {
+        result.push({
+          type: 'tool_call',
+          tool_call_id: `${event.tool_call_id || 'differential'}-child-${subIndex}`,
+          tool_name: 'differential_subagent',
+          arguments: { diagnosis: subagent?.diagnosis },
+          pending: false,
+          success: subagent?.status !== 'failed',
+          duration_ms: subagent?.duration_ms,
+          duration: subagent?.duration_ms,
+          tool_data: {
+            display_type: 'differential_subagent',
+            ...subagent,
+          },
+          timestamp: event.timestamp,
+          _rehydrated_subagent: true,
+        });
+      });
+    }
   }
 
   // Relocate each retracted (superseded) answer — a tool round's optimistic
@@ -1840,7 +1878,12 @@ const hasResults = (event: any): boolean => {
   }
 
   // Attachment parsing and image analysis: compact inline status only
-  if (toolName === 'attachment_parsing' || toolName === 'image_analysis') {
+  if (
+    toolName === 'attachment_parsing' ||
+    toolName === 'image_analysis' ||
+    toolName === 'research_differentials' ||
+    toolName === 'differential_subagent'
+  ) {
     return false;
   }
 
@@ -2345,8 +2388,43 @@ const getAttachmentParsingSummary = (event: any): string => {
   return getAttachmentParsingSummaryHtml(t, event);
 };
 
+const getDifferentialDiagnosis = (event: any): string =>
+  event?.tool_data?.diagnosis || event?.arguments?.diagnosis || t('agent.toolFallback');
+
+const getDifferentialToolTitle = (event: any): string => {
+  if (event?.tool_name === 'research_differentials') {
+    const count = event?.tool_data?.candidate_count || event?.arguments?.candidates?.length || 0;
+    if (event.pending) {
+      return t('agentStream.toolStatus.differentialResearchRunning', { count });
+    }
+    return t('agentStream.toolStatus.differentialResearchDone', {
+      completed: event?.tool_data?.success_count || 0,
+      count,
+      images: event?.tool_data?.image_count || 0,
+    });
+  }
+
+  const diagnosis = getDifferentialDiagnosis(event);
+  if (event.pending) {
+    return t('agentStream.toolStatus.differentialSubagentRunning', { diagnosis });
+  }
+  switch (event?.tool_data?.status) {
+    case 'completed':
+      return t('agentStream.toolStatus.differentialSubagentDone', { diagnosis });
+    case 'no_image':
+      return t('agentStream.toolStatus.differentialSubagentNoImage', { diagnosis });
+    case 'no_match':
+      return t('agentStream.toolStatus.differentialSubagentNoMatch', { diagnosis });
+    default:
+      return t('agentStream.toolStatus.differentialSubagentFailed', { diagnosis });
+  }
+};
+
 // Get tool title - prefer summary over description, add query for search tools
 const getToolTitle = (event: any): string => {
+  if (event.tool_name === 'research_differentials' || event.tool_name === 'differential_subagent') {
+    return getDifferentialToolTitle(event);
+  }
   if (event.pending) {
     if (event.tool_name === 'image_analysis') {
       return t('agentStream.toolStatus.imageAnalyzing');
@@ -2848,6 +2926,27 @@ const handleAddToKnowledge = (answerEvent: any) => {
       opacity: 1;
       box-shadow: none;
       background: transparent;
+    }
+
+    &.action-subagent-parent {
+      .action-name {
+        font-weight: 600;
+      }
+    }
+
+    &.action-subagent-child {
+      margin-left: 18px;
+
+      &::before {
+        content: '';
+        position: absolute;
+        left: -10px;
+        top: 8px;
+        bottom: 8px;
+        width: 2px;
+        border-radius: 2px;
+        background: var(--td-brand-color-light);
+      }
     }
   }
 

@@ -27,6 +27,8 @@ func (r *Registry) ModelOutput(result *types.ToolResult) string {
 		return r.modelKnowledgeOutput("keyword", mapsValue(result.Data["chunk_results"]), result.Output)
 	case "search_results":
 		return r.modelKnowledgeOutput("semantic", mapsValue(result.Data["results"]), result.Output)
+	case "differential_subagents":
+		return r.modelKnowledgeOutput("differential_subagents", mapsValue(result.Data["results"]), result.Output)
 	case "knowledge_chunks_list":
 		return r.modelKnowledgeChunksOutput(result.Data, result.Output)
 	case "document_info":

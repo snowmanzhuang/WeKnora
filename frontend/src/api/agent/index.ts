@@ -80,6 +80,10 @@ export interface CustomAgentConfig {
   vlm_model_id?: string;            // VLM模型ID（图片分析用）
   // 智能推理模式：辅助 VLM 先生成眼科图像报告，再将原图和报告一并交给主模型
   auxiliary_vlm_preanalysis_enabled?: boolean;
+  // 智能推理模式：针对 2-5 个眼科鉴别方向并发运行隔离检索子智能体
+  differential_subagents_enabled?: boolean;
+  differential_subagent_model_id?: string;
+  differential_subagents_max_concurrency?: number;
   image_storage_provider?: string;   // 图片存储提供商
   audio_upload_enabled?: boolean;    // 是否启用音频上传/ASR转录（默认: false）
   asr_model_id?: string;            // ASR模型ID（音频转录用）
