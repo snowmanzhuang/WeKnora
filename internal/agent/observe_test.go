@@ -195,6 +195,50 @@ func TestAppendToolResults_AddsDynamicImageRequirementToCustomSystemPrompt(t *te
 	assert.Equal(t, 1, strings.Count(out[0].Content, agentRetrievedImageRequirementMarker))
 }
 
+func TestDifferentialResearchCompactsPreliminaryResultsAndForcesFinalSynthesis(t *testing.T) {
+	prior := []chat.Message{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "这个考虑什么"},
+		{Role: "assistant", ToolCalls: []chat.ToolCall{{
+			ID:       "search-1",
+			Function: chat.FunctionCall{Name: agenttools.ToolKnowledgeSearch},
+		}}},
+		{Role: "tool", Name: agenttools.ToolKnowledgeSearch, ToolCallID: "search-1",
+			Content: strings.Repeat("large preliminary retrieval ", 1000)},
+	}
+	compacted := compactPreliminaryRetrievalMessages(prior)
+	require.Len(t, compacted, len(prior))
+	assert.Less(t, len(compacted[3].Content), 300)
+	assert.Equal(t, "search-1", compacted[3].ToolCallID)
+
+	withInstruction := appendDifferentialFinalSynthesisInstruction(compacted)
+	assert.Contains(t, withInstruction[0].Content, differentialFinalSynthesisMarker)
+	assert.Contains(t, withInstruction[0].Content, "without requesting more tools")
+}
+
+func TestStepCompletedDifferentialResearch(t *testing.T) {
+	completed := types.AgentStep{ToolCalls: []types.ToolCall{{
+		Name: agenttools.ToolResearchDifferentials,
+		Result: &types.ToolResult{
+			Success: true,
+		},
+	}}}
+	assert.True(t, stepCompletedDifferentialResearch(completed))
+	assert.True(t, hasCompletedDifferentialResearch([]types.AgentStep{completed}))
+
+	failed := types.AgentStep{ToolCalls: []types.ToolCall{{
+		Name: agenttools.ToolResearchDifferentials,
+		Result: &types.ToolResult{
+			Success: false,
+		},
+	}}}
+	assert.False(t, stepCompletedDifferentialResearch(failed))
+	assert.True(t, hasCompletedDifferentialResearch([]types.AgentStep{
+		completed,
+		{Thought: "partial final synthesis"},
+	}))
+}
+
 func TestBuildRuntimeContextBlock_PinnedDocuments(t *testing.T) {
 	block := buildRuntimeContextBlock(
 		"sess-1",

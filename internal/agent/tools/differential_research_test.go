@@ -11,6 +11,97 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDifferentialImagesFromMarkdown(t *testing.T) {
+	content := `正文
+![Fig. 3.15 MEWDS fundus photograph](resource://mewds-image)
+![Birdshot ICGA](<resource://birdshot-image> "plate 2")
+![重复图](resource://mewds-image)`
+
+	images := differentialImagesFromMarkdown(content)
+	require.Len(t, images, 2)
+	require.Equal(t, "resource://mewds-image", images[0].URL)
+	require.Equal(t, "Fig. 3.15 MEWDS fundus photograph", images[0].Caption)
+	require.Equal(t, "resource://birdshot-image", images[1].URL)
+	require.Equal(t, "Birdshot ICGA", images[1].Caption)
+}
+
+func TestSelectDifferentialSourcesRecognizesMarkdownImages(t *testing.T) {
+	rows := []map[string]interface{}{
+		{"chunk_id": "c1", "content": "best text evidence"},
+		{"chunk_id": "c2", "content": "second text evidence"},
+		{
+			"chunk_id": "c3",
+			"content":  "MEWDS\n![MEWDS color fundus photograph](resource://mewds)",
+		},
+	}
+
+	sources := selectDifferentialSources(rows, 3)
+	require.Len(t, sources, 3)
+	require.Len(t, sources[2].Images, 1)
+	require.Equal(t, "resource://mewds", sources[2].Images[0].URL)
+}
+
+func TestRankedDifferentialImagesPrioritizesCandidateCaption(t *testing.T) {
+	sources := []differentialSource{{
+		KnowledgeTitle: "Atlas",
+		Content:        "White dot syndromes",
+		Images: []differentialImage{
+			{URL: "resource://unrelated", Caption: "Birdshot chorioretinopathy"},
+			{URL: "resource://match", Caption: "Fig. 3.15 Multiple evanescent white dot syndrome (MEWDS)"},
+		},
+	}}
+	images, _ := rankedDifferentialImages(
+		DifferentialResearchInput{ImageType: "color fundus photograph"},
+		DifferentialCandidate{
+			Diagnosis: "多发性一过性白点综合征",
+			Synonyms:  []string{"MEWDS", "Multiple evanescent white dot syndrome"},
+		},
+		sources,
+	)
+	require.Len(t, images, 2)
+	require.Equal(t, "resource://match", images[0].URL)
+}
+
+func TestExplicitlyMatchedDifferentialImageIndexRequiresNamedCaption(t *testing.T) {
+	images := []differentialImage{
+		{URL: "resource://generic", Caption: "Posterior pole color fundus photograph"},
+		{URL: "resource://match", Caption: "Multiple evanescent white dot syndrome (MEWDS)"},
+	}
+	candidate := DifferentialCandidate{
+		Diagnosis: "多发性一过性白点综合征",
+		Synonyms:  []string{"MEWDS", "Multiple evanescent white dot syndrome"},
+	}
+	require.Equal(t, 2, explicitlyMatchedDifferentialImageIndex(images, candidate))
+	require.Zero(t, explicitlyMatchedDifferentialImageIndex(images[:1], candidate))
+}
+
+func TestRankDifferentialKnowledgeBasesUsesSubspecialtyAndModality(t *testing.T) {
+	kbs := []*types.KnowledgeBase{
+		{ID: "general", Name: "01 眼科综合"},
+		{ID: "retina", Name: "06 眼底内科"},
+		{ID: "uveitis", Name: "08 葡萄膜炎与眼内炎症"},
+		{ID: "angiography", Name: "15 FFA/ICGA"},
+		{ID: "cornea", Name: "02 角膜与眼表"},
+	}
+	allowed := map[string]bool{
+		"general": true, "retina": true, "uveitis": true, "angiography": true, "cornea": true,
+	}
+	got := rankDifferentialKnowledgeBases(
+		DifferentialResearchInput{ImageType: "ICGA"},
+		DifferentialCandidate{
+			Diagnosis: "Vogt-Koyanagi-Harada disease",
+			Synonyms:  []string{"VKH", "小柳-原田病"},
+		},
+		kbs,
+		allowed,
+		4,
+	)
+	require.Contains(t, got, "uveitis")
+	require.Contains(t, got, "angiography")
+	require.Contains(t, got, "general")
+	require.NotContains(t, got, "cornea")
+}
+
 func TestDifferentialResearchToolRunsFiveWorkersConcurrently(t *testing.T) {
 	tool := &DifferentialResearchTool{
 		BaseTool:       differentialResearchTool,

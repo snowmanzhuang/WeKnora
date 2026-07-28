@@ -551,6 +551,60 @@ var kbToolNames = map[string]bool{
 	agenttools.ToolResearchDifferentials: true,
 }
 
+const differentialFinalSynthesisMarker = "<!-- weknora-differential-final-synthesis -->"
+
+func stepCompletedDifferentialResearch(step types.AgentStep) bool {
+	for _, call := range step.ToolCalls {
+		if call.Name == agenttools.ToolResearchDifferentials &&
+			call.Result != nil && call.Result.Success {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCompletedDifferentialResearch(steps []types.AgentStep) bool {
+	for _, step := range steps {
+		if stepCompletedDifferentialResearch(step) {
+			return true
+		}
+	}
+	return false
+}
+
+func compactPreliminaryRetrievalMessages(messages []chat.Message) []chat.Message {
+	out := make([]chat.Message, len(messages))
+	copy(out, messages)
+	for i := range out {
+		if out[i].Role != "tool" || out[i].Name == agenttools.ToolResearchDifferentials ||
+			!kbToolNames[out[i].Name] {
+			continue
+		}
+		out[i].Content = "[Preliminary retrieval compacted; the completed differential research below contains the verified evidence and selected images needed for final synthesis.]"
+	}
+	return out
+}
+
+func appendDifferentialFinalSynthesisInstruction(messages []chat.Message) []chat.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	for i := range messages {
+		if messages[i].Role != "system" {
+			continue
+		}
+		if strings.Contains(messages[i].Content, differentialFinalSynthesisMarker) {
+			return messages
+		}
+		messages[i].Content += `
+
+` + differentialFinalSynthesisMarker + `
+The parallel ophthalmology differential research is complete. Produce the final answer now without requesting more tools. Preserve the candidates' probability order. For every completed candidate, include its returned Markdown image verbatim immediately below that candidate and explain the key comparison point; never reuse one candidate's image for another diagnosis. Clearly label any missing or different-modality image. Keep the answer clinically focused and concise—normally 800–1600 Chinese characters plus the required Markdown image lines and citations. Do not repeat the retrieval process.`
+		return messages
+	}
+	return messages
+}
+
 // redactHistoryKBResults replaces full KB tool results in historical context
 // with brief markers. This prevents the LLM from reusing stale retrieval data
 // when the knowledge base has been modified or switched between turns.

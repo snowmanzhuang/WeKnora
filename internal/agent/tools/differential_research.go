@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,8 +22,12 @@ import (
 
 const (
 	defaultDifferentialEvidenceRows = 3
-	maxDifferentialEvidenceRunes    = 1800
-	maxDifferentialSummaryRunes     = 900
+	differentialSearchTopK          = 8
+	differentialMaxRerankCandidates = 24
+	differentialMaxSearchResults    = 10
+	maxDifferentialCandidateImages  = 8
+	maxDifferentialEvidenceRunes    = 1400
+	maxDifferentialSummaryRunes     = 650
 )
 
 var differentialResearchTool = BaseTool{
@@ -78,6 +84,7 @@ type DifferentialCandidate struct {
 	Diagnosis              string   `json:"diagnosis"`
 	Synonyms               []string `json:"synonyms,omitempty"`
 	DiscriminatingFeatures string   `json:"discriminating_features,omitempty"`
+	SearchKnowledgeBaseIDs []string `json:"-"`
 }
 
 // DifferentialResearchInput is deliberately bounded to five candidates.
@@ -197,6 +204,7 @@ func (t *DifferentialResearchTool) Execute(ctx context.Context, args json.RawMes
 			return &types.ToolResult{Success: false, Error: err.Error()}, err
 		}
 	}
+	t.routeDifferentialCandidates(ctx, &input)
 
 	limit := types.NormalizeDifferentialSubagentConcurrency(t.maxConcurrency)
 	results := make([]DifferentialSubagentResult, len(input.Candidates))
@@ -324,7 +332,11 @@ func (t *DifferentialResearchTool) runCandidate(
 		t.config,
 	)
 	searchArgs, _ := json.Marshal(KnowledgeSearchInput{
-		Queries: differentialSearchQueries(input, candidate),
+		Queries:             differentialSearchQueries(input, candidate),
+		KnowledgeBaseIDs:    candidate.SearchKnowledgeBaseIDs,
+		TopK:                differentialSearchTopK,
+		MaxRerankCandidates: differentialMaxRerankCandidates,
+		MaxResults:          differentialMaxSearchResults,
 	})
 	searchResult, err := searchTool.Execute(ctx, searchArgs)
 	if err != nil || searchResult == nil || !searchResult.Success {
@@ -333,6 +345,23 @@ func (t *DifferentialResearchTool) runCandidate(
 	}
 
 	rows := mapsFromAny(searchResult.Data["results"])
+	// Scoped routing keeps the common path fast. If the routed result set has
+	// evidence but no image-bearing chunk at all, broaden once so an unusual
+	// diagnosis is not denied a reference image merely because its material
+	// lives outside the expected subspecialty library.
+	if len(candidate.SearchKnowledgeBaseIDs) > 0 &&
+		len(candidate.SearchKnowledgeBaseIDs) < len(t.searchTargets.GetAllKnowledgeBaseIDs()) &&
+		!differentialRowsHaveImages(rows) {
+		fallbackArgs, _ := json.Marshal(KnowledgeSearchInput{
+			Queries:             differentialSearchQueries(input, candidate),
+			TopK:                5,
+			MaxRerankCandidates: 16,
+			MaxResults:          6,
+		})
+		if fallback, fallbackErr := searchTool.Execute(ctx, fallbackArgs); fallbackErr == nil && fallback != nil && fallback.Success {
+			rows = mergeDifferentialRows(rows, mapsFromAny(fallback.Data["results"]))
+		}
+	}
 	if len(rows) == 0 {
 		result.Status = "no_match"
 		result.Limitations = []string{"知识库检索未找到足够相关的证据或可靠参考图。"}
@@ -363,9 +392,12 @@ func (t *DifferentialResearchTool) runCandidate(
 			if content := stringFromMap(deepRows[0], "content"); content != "" {
 				sources[index].Content = content
 			}
-			if images := differentialImagesFromAny(deepRows[0]["images"]); len(images) > 0 {
-				sources[index].Images = images
-			}
+			sources[index].Images = mergeDifferentialImages(
+				sources[index].Images,
+				differentialImagesFromAny(deepRows[0]["images"]),
+				differentialImagesFromImageInfo(deepRows[0]["image_info"]),
+				differentialImagesFromMarkdown(sources[index].Content),
+			)
 		}
 	}
 
@@ -379,13 +411,20 @@ func (t *DifferentialResearchTool) runCandidate(
 	result.SupportingEvidence = trimStringSlice(summary.SupportingEvidence, 5, 320)
 	result.Limitations = trimStringSlice(summary.Limitations, 4, 320)
 
-	allImages, imageSources := flattenDifferentialImages(sources)
-	if summary.SelectedImageIndex > 0 && summary.SelectedImageIndex <= len(allImages) {
-		selected := allImages[summary.SelectedImageIndex-1]
+	allImages, imageSources := rankedDifferentialImages(input, candidate, sources)
+	selectedImageIndex := summary.SelectedImageIndex
+	if selectedImageIndex == 0 {
+		selectedImageIndex = explicitlyMatchedDifferentialImageIndex(allImages, candidate)
+		if selectedImageIndex > 0 {
+			summary.ImageReason = "知识库原始图注明确标注该鉴别方向；作为典型参考图采用。"
+		}
+	}
+	if selectedImageIndex > 0 && selectedImageIndex <= len(allImages) {
+		selected := allImages[selectedImageIndex-1]
 		if selected.URL != "" {
 			result.Image = &selected
 			result.ImageReason = truncateRunesString(strings.TrimSpace(summary.ImageReason), 320)
-			result.primarySource = imageSources[summary.SelectedImageIndex-1]
+			result.primarySource = imageSources[selectedImageIndex-1]
 		}
 	}
 	if result.primarySource == nil {
@@ -417,7 +456,7 @@ func (t *DifferentialResearchTool) summarizeCandidate(
 		fmt.Fprintf(&evidence, "\n【证据 %d｜%s】\n%s\n", i+1, source.KnowledgeTitle,
 			truncateRunesString(strings.TrimSpace(source.Content), maxDifferentialEvidenceRunes))
 	}
-	allImages, _ := flattenDifferentialImages(sources)
+	allImages, _ := rankedDifferentialImages(input, candidate, sources)
 	if len(allImages) > 0 {
 		evidence.WriteString("\n【候选图片】\n")
 		for i, image := range allImages {
@@ -462,7 +501,7 @@ func (t *DifferentialResearchTool) summarizeCandidate(
 		{Role: "user", Content: userPrompt},
 	}, &chat.ChatOptions{
 		Temperature:         0.1,
-		MaxCompletionTokens: 900,
+		MaxCompletionTokens: 650,
 		Thinking:            &thinking,
 		Format:              format,
 	})
@@ -479,18 +518,185 @@ func (t *DifferentialResearchTool) summarizeCandidate(
 func differentialSearchQueries(input DifferentialResearchInput, candidate DifferentialCandidate) []string {
 	names := append([]string{candidate.Diagnosis}, candidate.Synonyms...)
 	names = trimStringSlice(names, 7, 120)
-	query := fmt.Sprintf("%s 在 %s 中的典型影像表现、鉴别要点和带图病例",
-		strings.Join(names, " / "), input.ImageType)
-	queries := []string{query}
 	features := strings.TrimSpace(candidate.DiscriminatingFeatures)
 	if features == "" {
 		features = strings.TrimSpace(input.KeyFindings)
 	}
+	query := fmt.Sprintf("%s 在 %s 中的典型影像表现、带图病例及鉴别要点",
+		strings.Join(names, " / "), input.ImageType)
 	if features != "" {
-		queries = append(queries, fmt.Sprintf("%s：%s，与相近疾病的影像鉴别",
-			candidate.Diagnosis, truncateRunesString(features, 500)))
+		query += "；重点征象：" + truncateRunesString(features, 320)
 	}
-	return queries
+	return []string{query}
+}
+
+func (t *DifferentialResearchTool) routeDifferentialCandidates(
+	ctx context.Context,
+	input *DifferentialResearchInput,
+) {
+	if t == nil || input == nil || t.knowledgeBaseService == nil {
+		return
+	}
+	kbIDs := t.searchTargets.GetAllKnowledgeBaseIDs()
+	if len(kbIDs) <= 4 {
+		return
+	}
+	kbs, err := t.knowledgeBaseService.GetKnowledgeBasesByIDsOnly(ctx, kbIDs)
+	if err != nil || len(kbs) == 0 {
+		return
+	}
+	allowed := make(map[string]bool, len(kbIDs))
+	for _, id := range kbIDs {
+		allowed[id] = true
+	}
+	for i := range input.Candidates {
+		input.Candidates[i].SearchKnowledgeBaseIDs = rankDifferentialKnowledgeBases(
+			*input,
+			input.Candidates[i],
+			kbs,
+			allowed,
+			4,
+		)
+	}
+}
+
+type differentialKBRouteRule struct {
+	queryTerms []string
+	kbTerms    []string
+	score      int
+}
+
+var differentialKBRoutingRules = []differentialKBRouteRule{
+	{[]string{"vkh", "vogt", "小柳", "葡萄膜", "uveitis", "交感性眼炎", "sympathetic ophthalmia", "birdshot", "meWDS", "白点综合征", "脉络膜炎", "choroiditis"}, []string{"葡萄膜", "眼内炎", "uveitis"}, 120},
+	{[]string{"视网膜", "retina", "黄斑", "macula", "眼底", "fundus", "meWDS", "birdshot", "脉络膜", "choroid"}, []string{"眼底内科", "视网膜内科", "retina"}, 100},
+	{[]string{"视网膜脱离", "retinal detachment", "黄斑裂孔", "macular hole", "玻璃体", "vitreous", "增殖性玻璃体"}, []string{"玻璃体视网膜外科", "眼底外科"}, 110},
+	{[]string{"角膜", "cornea", "结膜", "conjunct", "干眼", "ocular surface"}, []string{"角膜", "眼表"}, 110},
+	{[]string{"白内障", "cataract", "晶状体", "lens"}, []string{"白内障"}, 110},
+	{[]string{"青光眼", "glaucoma", "视神经杯", "optic cup"}, []string{"青光眼"}, 110},
+	{[]string{"视神经", "optic nerve", "视路", "visual pathway", "神经眼科", "papill"}, []string{"神经眼科"}, 110},
+	{[]string{"儿童", "小儿", "pediatric", "早产儿", "rop", "斜视", "strabismus"}, []string{"小儿眼科"}, 110},
+	{[]string{"眼眶", "orbit", "眼睑", "eyelid", "泪道", "lacrimal", "肿瘤", "tumor"}, []string{"整形", "泪道", "眼眶", "眼肿瘤"}, 110},
+	{[]string{"外伤", "trauma", "异物", "foreign body", "破裂伤"}, []string{"眼外伤", "急症"}, 110},
+	{[]string{"屈光", "refraction", "近视", "myopia", "远视", "hyperopia", "散光", "astigmat"}, []string{"屈光", "视光"}, 105},
+	{[]string{"oct", "octa", "光学相干"}, []string{"oct", "octa"}, 130},
+	{[]string{"ffa", "icga", "荧光素血管造影", "吲哚青绿", "fluorescein angiography", "angiography"}, []string{"ffa", "icga"}, 130},
+	{[]string{"ct", "mri", "磁共振", "计算机断层"}, []string{"ct", "mri"}, 130},
+	{[]string{"ubm", "超声", "b超", "ultrasound"}, []string{"超声", "ubm"}, 130},
+	{[]string{"视野", "visual field", "perimetry"}, []string{"视野"}, 130},
+	{[]string{"电生理", "erg", "vep", "eog", "electrophysiology"}, []string{"视觉电生理", "电生理"}, 130},
+	{[]string{"地形图", "topography", "前节分析", "共聚焦"}, []string{"角膜地形图", "前节分析", "共聚焦"}, 130},
+	{[]string{"房角镜", "gonioscopy"}, []string{"房角镜"}, 130},
+}
+
+type scoredDifferentialKB struct {
+	id    string
+	score int
+	order int
+}
+
+func rankDifferentialKnowledgeBases(
+	input DifferentialResearchInput,
+	candidate DifferentialCandidate,
+	kbs []*types.KnowledgeBase,
+	allowed map[string]bool,
+	limit int,
+) []string {
+	query := strings.ToLower(strings.Join([]string{
+		candidate.Diagnosis,
+		strings.Join(candidate.Synonyms, " "),
+		candidate.DiscriminatingFeatures,
+		input.ImageType,
+		input.KeyFindings,
+	}, " "))
+	scored := make([]scoredDifferentialKB, 0, len(kbs))
+	for order, kb := range kbs {
+		if kb == nil || !allowed[kb.ID] {
+			continue
+		}
+		name := strings.ToLower(kb.Name + " " + kb.Description)
+		score := 0
+		for _, rule := range differentialKBRoutingRules {
+			if containsAnyDifferentialTerm(query, rule.queryTerms) &&
+				containsAnyDifferentialTerm(name, rule.kbTerms) {
+				score += rule.score
+			}
+		}
+		if containsAnyDifferentialTerm(name, []string{"综合", "general ophthalmology"}) {
+			score += 12
+		}
+		if score > 0 {
+			scored = append(scored, scoredDifferentialKB{id: kb.ID, score: score, order: order})
+		}
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].order < scored[j].order
+	})
+	if limit > 0 && len(scored) > limit {
+		scored = scored[:limit]
+	}
+	// An empty route deliberately means "search all accessible KBs". This is
+	// safer than guessing when a KB installation uses custom names.
+	result := make([]string, 0, len(scored))
+	for _, item := range scored {
+		result = append(result, item.id)
+	}
+	return result
+}
+
+func containsAnyDifferentialTerm(text string, terms []string) bool {
+	for _, term := range terms {
+		if strings.Contains(text, strings.ToLower(term)) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitDifferentialTerms(value string) []string {
+	out := []string{strings.TrimSpace(value)}
+	out = append(out, strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case '/', '\\', ',', '，', '、', ';', '；', '|', '(', ')', '（', '）', ':', '：':
+			return true
+		default:
+			return false
+		}
+	})...)
+	return out
+}
+
+func differentialRowsHaveImages(rows []map[string]interface{}) bool {
+	for _, row := range rows {
+		if differentialRowHasImages(row) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeDifferentialRows(groups ...[]map[string]interface{}) []map[string]interface{} {
+	var out []map[string]interface{}
+	seen := make(map[string]bool)
+	for _, rows := range groups {
+		for _, row := range rows {
+			key := firstNonEmptyString(
+				stringFromMap(row, "chunk_id"),
+				stringFromMap(row, "faq_id"),
+				stringFromMap(row, "id"),
+			)
+			if key != "" && seen[key] {
+				continue
+			}
+			if key != "" {
+				seen[key] = true
+			}
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 func selectDifferentialSources(rows []map[string]interface{}, limit int) []differentialSource {
@@ -522,7 +728,7 @@ func selectDifferentialSources(rows []map[string]interface{}, limit int) []diffe
 		if len(selected) >= limit {
 			break
 		}
-		if len(differentialImagesFromAny(row["images"])) > 0 {
+		if differentialRowHasImages(row) {
 			addRow(row)
 		}
 	}
@@ -536,14 +742,92 @@ func selectDifferentialSources(rows []map[string]interface{}, limit int) []diffe
 }
 
 func differentialSourceFromRow(row map[string]interface{}) differentialSource {
+	content := stringFromMap(row, "content")
 	return differentialSource{
 		ChunkID:        firstNonEmptyString(stringFromMap(row, "chunk_id"), stringFromMap(row, "faq_id")),
 		KnowledgeID:    stringFromMap(row, "knowledge_id"),
 		KnowledgeBase:  firstNonEmptyString(stringFromMap(row, "knowledge_base_id"), stringFromMap(row, "knowledge_base")),
 		KnowledgeTitle: firstNonEmptyString(stringFromMap(row, "knowledge_title"), "知识库文档"),
-		Content:        stringFromMap(row, "content"),
-		Images:         differentialImagesFromAny(row["images"]),
+		Content:        content,
+		Images: mergeDifferentialImages(
+			differentialImagesFromAny(row["images"]),
+			differentialImagesFromImageInfo(row["image_info"]),
+			differentialImagesFromMarkdown(content),
+		),
 	}
+}
+
+var differentialMarkdownImagePattern = regexp.MustCompile(
+	`!\[([^\]]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s)\r\n]+))(?:\s+["'][^"'\r\n]*["'])?\s*\)`,
+)
+
+func differentialImagesFromMarkdown(content string) []differentialImage {
+	matches := differentialMarkdownImagePattern.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	images := make([]differentialImage, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		url := strings.TrimSpace(firstNonEmptyString(match[2], match[3]))
+		if url == "" {
+			continue
+		}
+		images = append(images, differentialImage{
+			URL:     url,
+			Caption: strings.TrimSpace(strings.ReplaceAll(match[1], `\]`, "]")),
+		})
+	}
+	return mergeDifferentialImages(images)
+}
+
+func differentialImagesFromImageInfo(value interface{}) []differentialImage {
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	if raw == "" || raw == "<nil>" {
+		return nil
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil
+	}
+	return differentialImagesFromAny(parsed)
+}
+
+func mergeDifferentialImages(groups ...[]differentialImage) []differentialImage {
+	var out []differentialImage
+	positions := make(map[string]int)
+	for _, images := range groups {
+		for _, image := range images {
+			image.URL = strings.TrimSpace(image.URL)
+			image.Caption = strings.TrimSpace(image.Caption)
+			image.OCRText = strings.TrimSpace(image.OCRText)
+			if image.URL == "" {
+				continue
+			}
+			if index, exists := positions[image.URL]; exists {
+				if out[index].Caption == "" {
+					out[index].Caption = image.Caption
+				}
+				if out[index].OCRText == "" {
+					out[index].OCRText = image.OCRText
+				}
+				continue
+			}
+			positions[image.URL] = len(out)
+			out = append(out, image)
+		}
+	}
+	return out
+}
+
+func differentialRowHasImages(row map[string]interface{}) bool {
+	if len(differentialImagesFromAny(row["images"])) > 0 ||
+		len(differentialImagesFromImageInfo(row["image_info"])) > 0 {
+		return true
+	}
+	return len(differentialImagesFromMarkdown(stringFromMap(row, "content"))) > 0
 }
 
 func differentialImagesFromAny(value interface{}) []differentialImage {
@@ -583,6 +867,105 @@ func flattenDifferentialImages(sources []differentialSource) ([]differentialImag
 		}
 	}
 	return images, owners
+}
+
+type scoredDifferentialImage struct {
+	image differentialImage
+	owner *differentialSource
+	score int
+	order int
+}
+
+func rankedDifferentialImages(
+	input DifferentialResearchInput,
+	candidate DifferentialCandidate,
+	sources []differentialSource,
+) ([]differentialImage, []*differentialSource) {
+	images, owners := flattenDifferentialImages(sources)
+	if len(images) <= 1 {
+		return images, owners
+	}
+	terms := imageMatchingTerms(input, candidate)
+	ranked := make([]scoredDifferentialImage, 0, len(images))
+	for i, image := range images {
+		owner := owners[i]
+		captionText := strings.ToLower(image.Caption + " " + image.OCRText)
+		sourceText := ""
+		if owner != nil {
+			sourceText = strings.ToLower(owner.KnowledgeTitle + " " + owner.Content)
+		}
+		score := 0
+		for _, term := range terms {
+			if term == "" {
+				continue
+			}
+			if strings.Contains(captionText, term) {
+				score += 8
+			} else if strings.Contains(sourceText, term) {
+				score += 2
+			}
+		}
+		if image.Caption != "" {
+			score++
+		}
+		ranked = append(ranked, scoredDifferentialImage{
+			image: image, owner: owner, score: score, order: i,
+		})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].order < ranked[j].order
+	})
+	if len(ranked) > maxDifferentialCandidateImages {
+		ranked = ranked[:maxDifferentialCandidateImages]
+	}
+	outImages := make([]differentialImage, 0, len(ranked))
+	outOwners := make([]*differentialSource, 0, len(ranked))
+	for _, item := range ranked {
+		outImages = append(outImages, item.image)
+		outOwners = append(outOwners, item.owner)
+	}
+	return outImages, outOwners
+}
+
+func imageMatchingTerms(input DifferentialResearchInput, candidate DifferentialCandidate) []string {
+	values := append([]string{candidate.Diagnosis, input.ImageType}, candidate.Synonyms...)
+	var terms []string
+	for _, value := range values {
+		for _, term := range splitDifferentialTerms(value) {
+			term = strings.ToLower(strings.TrimSpace(term))
+			if utf8.RuneCountInString(term) >= 2 {
+				terms = append(terms, term)
+			}
+		}
+	}
+	return trimStringSlice(terms, 16, 80)
+}
+
+func explicitlyMatchedDifferentialImageIndex(
+	images []differentialImage,
+	candidate DifferentialCandidate,
+) int {
+	values := append([]string{candidate.Diagnosis}, candidate.Synonyms...)
+	var terms []string
+	for _, value := range values {
+		for _, term := range splitDifferentialTerms(value) {
+			term = strings.ToLower(strings.TrimSpace(term))
+			if utf8.RuneCountInString(term) >= 3 {
+				terms = append(terms, term)
+			}
+		}
+	}
+	terms = trimStringSlice(terms, 12, 100)
+	for index, image := range images {
+		caption := strings.ToLower(strings.TrimSpace(image.Caption + " " + image.OCRText))
+		if caption != "" && containsAnyDifferentialTerm(caption, terms) {
+			return index + 1
+		}
+	}
+	return 0
 }
 
 func differentialModelRow(result DifferentialSubagentResult) map[string]interface{} {

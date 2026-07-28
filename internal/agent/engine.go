@@ -476,6 +476,14 @@ func (e *AgentEngine) runReActIteration(
 ) (outcome iterOutcome, retErr error) {
 	roundStart := time.Now()
 	round := state.CurrentRound + 1
+	activeTools := tools
+	differentialFinalSynthesis := hasCompletedDifferentialResearch(state.RoundSteps)
+	if differentialFinalSynthesis {
+		// The bounded differential tool has already searched, deep-read and
+		// matched images for every direction. Removing tools from this one
+		// synthesis round prevents another expensive retrieval/planning loop.
+		activeTools = nil
+	}
 
 	// Open the round-level Langfuse span. Any chat/tool calls made inside
 	// this iteration will attach under it via ctx, giving the UI a clean
@@ -537,18 +545,18 @@ func (e *AgentEngine) runReActIteration(
 	}
 
 	logger.Infof(ctx, "[Agent][Round-%d/%d] Starting: %d messages, %d tools, est_tokens=%d",
-		round, e.config.MaxIterations, len(*messagesPtr), len(tools), currentTokens)
+		round, e.config.MaxIterations, len(*messagesPtr), len(activeTools), currentTokens)
 	common.PipelineInfo(ctx, "Agent", "round_start", map[string]interface{}{
 		"iteration":      state.CurrentRound,
 		"round":          round,
 		"message_count":  len(*messagesPtr),
-		"pending_tools":  len(tools),
+		"pending_tools":  len(activeTools),
 		"max_iterations": e.config.MaxIterations,
 	})
 
 	// 1. Think: Call LLM with function calling (includes retry + graceful degradation)
 	e.lastSentMsgCount = len(*messagesPtr)
-	resp, err := e.callLLMWithRetry(ctx, *messagesPtr, tools, state, query, state.CurrentRound, sessionID)
+	resp, err := e.callLLMWithRetry(ctx, *messagesPtr, activeTools, state, query, state.CurrentRound, sessionID)
 	if err != nil {
 		retErr = err
 		return iterOutcomeNext, err
@@ -661,7 +669,13 @@ func (e *AgentEngine) runReActIteration(
 
 	// 4. Observe: Add tool results to messages and write to context
 	state.RoundSteps = append(state.RoundSteps, step)
+	if stepCompletedDifferentialResearch(step) {
+		*messagesPtr = compactPreliminaryRetrievalMessages(*messagesPtr)
+	}
 	*messagesPtr = e.appendToolResults(*messagesPtr, step)
+	if stepCompletedDifferentialResearch(step) {
+		*messagesPtr = appendDifferentialFinalSynthesisInstruction(*messagesPtr)
+	}
 	common.PipelineInfo(ctx, "Agent", "round_end", map[string]interface{}{
 		"iteration":   state.CurrentRound,
 		"round":       round,

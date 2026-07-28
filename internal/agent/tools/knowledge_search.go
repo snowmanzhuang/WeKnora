@@ -106,6 +106,13 @@ Each chunk has a short cN source ID and belongs to a dN document ID. Results rep
 type KnowledgeSearchInput struct {
 	Queries          []string `json:"queries"`
 	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`
+	// The fields below are internal execution bounds used by composite tools
+	// such as research_differentials. They are intentionally omitted from the
+	// public function schema so ordinary agent calls keep the workspace
+	// retrieval configuration unchanged.
+	TopK                int `json:"top_k,omitempty"`
+	MaxRerankCandidates int `json:"max_rerank_candidates,omitempty"`
+	MaxResults          int `json:"max_results,omitempty"`
 }
 
 // searchResultWithMeta wraps search result with metadata about which query matched it
@@ -234,6 +241,12 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 	var vectorThreshold, keywordThreshold, minScore float64
 
 	// Fallback to global config if not set
+	if input.TopK > 0 {
+		topK = input.TopK
+		if topK > 50 {
+			topK = 50
+		}
+	}
 	if topK == 0 && t.config != nil {
 		topK = t.config.Conversation.EmbeddingTopK
 	}
@@ -282,6 +295,19 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 
 	// Deduplicate before reranking to reduce processing overhead
 	deduplicatedBeforeRerank := t.deduplicateResults(allResults)
+	if input.MaxRerankCandidates > 0 &&
+		len(deduplicatedBeforeRerank) > input.MaxRerankCandidates {
+		sort.SliceStable(deduplicatedBeforeRerank, func(i, j int) bool {
+			if deduplicatedBeforeRerank[i].Score != deduplicatedBeforeRerank[j].Score {
+				return deduplicatedBeforeRerank[i].Score > deduplicatedBeforeRerank[j].Score
+			}
+			return deduplicatedBeforeRerank[i].ID < deduplicatedBeforeRerank[j].ID
+		})
+		logger.Infof(ctx,
+			"[Tool][KnowledgeSearch] Bounded rerank candidates: %d -> %d",
+			len(deduplicatedBeforeRerank), input.MaxRerankCandidates)
+		deduplicatedBeforeRerank = deduplicatedBeforeRerank[:input.MaxRerankCandidates]
+	}
 
 	// Apply ReRank if model is configured
 	// Prefer rerankModel; fall back to chatModel (LLM-based reranking) if unavailable
@@ -360,6 +386,11 @@ func (t *KnowledgeSearchTool) Execute(ctx context.Context, args json.RawMessage)
 		// If scores are equal, sort by knowledge ID for consistency
 		return deduplicatedResults[i].KnowledgeID < deduplicatedResults[j].KnowledgeID
 	})
+	if input.MaxResults > 0 && len(deduplicatedResults) > input.MaxResults {
+		logger.Infof(ctx, "[Tool][KnowledgeSearch] Bounded final results: %d -> %d",
+			len(deduplicatedResults), input.MaxResults)
+		deduplicatedResults = deduplicatedResults[:input.MaxResults]
+	}
 
 	// Log all ranked results (including lower ranks for rerank debugging)
 	if len(deduplicatedResults) > 0 {
