@@ -654,7 +654,7 @@ CREATE TABLE IF NOT EXISTS im_channel_sessions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_lookup
     ON im_channel_sessions (platform, user_id, chat_id, tenant_id, agent_id, im_channel_id)
-    WHERE deleted_at IS NULL;
+    WHERE deleted_at IS NULL AND thread_id = '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_thread_lookup
     ON im_channel_sessions (platform, chat_id, thread_id, tenant_id, agent_id, im_channel_id)
     WHERE deleted_at IS NULL AND thread_id != '';
