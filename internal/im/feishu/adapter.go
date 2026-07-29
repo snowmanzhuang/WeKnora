@@ -174,7 +174,7 @@ func startStreamReaper() {
 					cutoff := time.Now().Add(-streamOrphanTTL)
 					feishuStreamsMu.Lock()
 					for id, state := range feishuStreams {
-						if state.createdAt.Before(cutoff) {
+						if state.inactiveSinceBefore(cutoff) {
 							delete(feishuStreams, id)
 						}
 					}
@@ -847,14 +847,18 @@ type feishuStreamState struct {
 	mu         sync.Mutex
 	content    strings.Builder
 	seq        int64     // strictly incrementing sequence for CardKit API
-	createdAt  time.Time // for orphan stream detection
+	createdAt  time.Time // retained for diagnostics
+	lastActive time.Time // refreshed whenever the card receives an update
 	firstChunk bool      // true after the first real content chunk clears the placeholder
 }
 
 const (
-	// streamOrphanTTL is the maximum lifetime of a stream entry before it's
-	// considered orphaned (e.g., EndStream was never called due to an error).
-	streamOrphanTTL = 5 * time.Minute
+	// streamOrphanTTL is the maximum period without any card activity before a
+	// stream is considered orphaned. Complex multimodal Agent turns can
+	// legitimately spend several minutes in VLM/retrieval without emitting a
+	// visible chunk, so this must be comfortably above the old five-minute
+	// lifetime cap.
+	streamOrphanTTL = 30 * time.Minute
 	// streamReaperInterval is how often the reaper scans for orphaned streams.
 	streamReaperInterval = 1 * time.Minute
 )
@@ -870,6 +874,16 @@ var (
 func (s *feishuStreamState) nextSeq() int {
 	s.seq++
 	return int(s.seq)
+}
+
+func (s *feishuStreamState) inactiveSinceBefore(cutoff time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lastActive := s.lastActive
+	if lastActive.IsZero() {
+		lastActive = s.createdAt
+	}
+	return lastActive.Before(cutoff)
 }
 
 // buildStreamingCardJSON builds a Card JSON 2.0 with streaming_mode enabled.
@@ -976,8 +990,9 @@ func (a *Adapter) StartStream(ctx context.Context, incoming *im.IncomingMessage)
 	}
 
 	// 3. Track stream state
+	now := time.Now()
 	feishuStreamsMu.Lock()
-	feishuStreams[cardID] = &feishuStreamState{createdAt: time.Now()}
+	feishuStreams[cardID] = &feishuStreamState{createdAt: now, lastActive: now}
 	feishuStreamsMu.Unlock()
 
 	logger.Infof(ctx, "[%s] Streaming started: card_id=%s", a.region.Label, cardID)
@@ -1003,6 +1018,7 @@ func (a *Adapter) UpdateStreamContent(ctx context.Context, incoming *im.Incoming
 	}
 	state.content.Reset()
 	state.content.WriteString(fullContent)
+	state.lastActive = time.Now()
 	seq := state.nextSeq()
 	state.mu.Unlock()
 
@@ -1045,6 +1061,7 @@ func (a *Adapter) EndStream(ctx context.Context, incoming *im.IncomingMessage, s
 	}
 
 	state.mu.Lock()
+	state.lastActive = time.Now()
 	seq := state.nextSeq()
 	state.mu.Unlock()
 

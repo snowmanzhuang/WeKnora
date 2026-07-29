@@ -4021,7 +4021,7 @@ export default {
     noAnswerContent: '(Нет содержимого ответа)',
     noMatchFound: 'Совпадений не найдено',
     deleteSessionFailed: 'Ошибка удаления, попробуйте позже!',
-    imageTooMany: 'Максимум 5 изображений',
+    imageTooMany: 'Максимум 10 изображений',
     imageTypeSizeError: 'Поддерживаются только JPG/PNG/GIF/WEBP до 10 МБ',
     imageUploadTooltip: 'Загрузить изображение (вставка/перетаскивание)',
     attachmentUploadTooltip: 'Загрузить вложение (документы, аудио и т.д.)',

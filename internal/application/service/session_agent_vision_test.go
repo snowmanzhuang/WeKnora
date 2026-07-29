@@ -19,7 +19,9 @@ func (m *auxiliaryVisionTestModel) Predict(
 	images [][]byte,
 	prompt string,
 ) (string, error) {
-	m.receivedImages = append(m.receivedImages, append([]byte(nil), images[0]...))
+	for _, image := range images {
+		m.receivedImages = append(m.receivedImages, append([]byte(nil), image...))
+	}
 	m.receivedPrompt = prompt
 	return "【图像类型】\nOCT", nil
 }
@@ -56,15 +58,16 @@ func TestAnalyzeAuxiliaryVisionDataURIsSkipsStoredURLAndPreservesImageIndex(t *t
 		[]string{
 			"resource://AbCdEfGhIjKlMnOpQrStUv",
 			"data:image/png;base64,AQID",
+			"data:image/png;base64,BAUG",
 		},
 	)
 
 	require.Len(t, results, 1)
-	require.Equal(t, 1, results[0].imageIndex)
+	require.Equal(t, []int{1, 2}, results[0].imageIndices)
 	require.Equal(t, "【图像类型】\nOCT", results[0].report)
-	require.Equal(t, [][]byte{{1, 2, 3}}, model.receivedImages)
-	require.Equal(t, OphthalmologyAuxiliaryVLMPrompt, model.receivedPrompt)
-	require.Contains(t, combineAuxiliaryVisionResults(results), "【图片 2：辅助视觉报告】")
+	require.Equal(t, [][]byte{{1, 2, 3}, {4, 5, 6}}, model.receivedImages)
+	require.Equal(t, BuildOphthalmologyAuxiliaryVLMPrompt(2), model.receivedPrompt)
+	require.Contains(t, combineAuxiliaryVisionResults(results), "【图片 2、3：联合辅助视觉报告】")
 }
 
 func TestApplyAuxiliaryVisionCaptionsPreservesStoredURLs(t *testing.T) {
@@ -73,16 +76,17 @@ func TestApplyAuxiliaryVisionCaptionsPreservesStoredURLs(t *testing.T) {
 		{URL: "resource://second"},
 	}
 	results := []auxiliaryVisionResult{
-		{imageIndex: 1, report: "【客观所见】\n黄斑区隆起"},
+		{imageIndices: []int{0, 1}, report: "【逐图所见】\n黄斑区隆起"},
 	}
 
 	updated := applyAuxiliaryVisionCaptions(images, results)
 
 	require.Equal(t, "resource://first", updated[0].URL)
-	require.Equal(t, "原有说明", updated[0].Caption)
+	require.Contains(t, updated[0].Caption, "【图片 1、2：联合辅助视觉报告】")
+	require.Contains(t, updated[0].Caption, "黄斑区隆起")
 	require.Equal(t, "resource://second", updated[1].URL)
-	require.Contains(t, updated[1].Caption, "【图片 2：辅助视觉报告】")
-	require.Contains(t, updated[1].Caption, "黄斑区隆起")
+	require.Contains(t, updated[1].Caption, "已纳入本轮多图联合辅助视觉分析")
+	require.Equal(t, "原有说明", images[0].Caption, "the input slice must not be mutated")
 	require.Empty(t, images[1].Caption, "the input slice must not be mutated")
 }
 

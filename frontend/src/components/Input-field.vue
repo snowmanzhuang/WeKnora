@@ -119,7 +119,7 @@ const addImageFiles = (files: File[]) => {
   const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
   const maxSize = 10 * 1024 * 1024;
   for (const file of files) {
-    if (uploadedImages.value.length >= 5) {
+    if (uploadedImages.value.length >= 10) {
       MessagePlugin.warning(t('chat.imageTooMany'));
       break;
     }
@@ -1876,9 +1876,9 @@ const createSession = async (val: string) => {
 
   // Images and non-embedded attachments both travel to the backend as
   // `attachment_ids`, which enforces a combined cap (MaxTemporaryAttachmentsPerMessage).
-  // The per-picker limits (5 images / 5 attachments) are independent, so guard the
+  // The per-picker limits (10 images / 5 attachments) are independent, so guard the
   // merged total here to avoid a late 400 after the files are already uploaded.
-  const MAX_TOTAL_ATTACHMENTS = 5;
+  const MAX_TOTAL_ATTACHMENTS = 15;
   const combinedAttachmentCount =
     uploadedImages.value.length +
     uploadedAttachments.value.filter(item => item.status !== 'failed').length;

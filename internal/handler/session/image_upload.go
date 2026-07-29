@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"strings"
 
 	appservice "github.com/Tencent/WeKnora/internal/application/service"
@@ -16,7 +17,7 @@ import (
 
 const (
 	maxImageSize   = 10 << 20 // 10MB per image
-	maxImagesCount = 5
+	maxImagesCount = 10
 )
 
 // saveImageAttachments decodes base64 images from the request and saves them to
@@ -79,21 +80,72 @@ func (h *Handler) analyzeImageAttachments(
 	)
 }
 
-// analyzeOphthalmologyImageAttachments creates one independent, structured
-// report per image. The VLM never receives the main model's analysis, and the
-// resulting captions are later injected as explicitly untrusted runtime data.
+// analyzeOphthalmologyImageAttachments sends all images from one user turn in
+// one VLM request. The report keeps per-image observations but also performs a
+// case-level comparison, which is both faster and clinically more coherent
+// than serial, isolated image calls.
 func (h *Handler) analyzeOphthalmologyImageAttachments(
 	ctx context.Context,
 	images []ImageAttachment,
 	vlmModelID string,
 ) int {
-	return h.analyzeImageAttachmentsWithPrompt(
+	if len(images) == 0 || vlmModelID == "" {
+		return 0
+	}
+
+	vlmModel, err := h.modelService.GetVLMModel(ctx, vlmModelID)
+	if err != nil {
+		logger.Warnf(ctx, "No VLM model available for joint image analysis, skipping: %v", err)
+		return 0
+	}
+
+	imageBytesList := make([][]byte, 0, len(images))
+	imageIndices := make([]int, 0, len(images))
+	for i := range images {
+		imgBytes, readErr := h.readImageBytesForAnalysis(ctx, images[i])
+		if readErr != nil {
+			logger.Warnf(ctx, "Failed to read image %d for joint VLM analysis: %v", i, readErr)
+			continue
+		}
+		imageBytesList = append(imageBytesList, imgBytes)
+		imageIndices = append(imageIndices, i)
+	}
+	if len(imageBytesList) == 0 {
+		return 0
+	}
+
+	analysis, analysisErr := vlmModel.Predict(
 		ctx,
-		images,
-		vlmModelID,
-		func(_ int) string { return ophthalmologyAuxiliaryVLMPrompt },
-		true,
+		imageBytesList,
+		appservice.BuildOphthalmologyAuxiliaryVLMPrompt(len(imageBytesList)),
 	)
+	if analysisErr != nil {
+		logger.Warnf(ctx, "Joint VLM analysis failed for %d image(s): %v", len(imageBytesList), analysisErr)
+		return 0
+	}
+	analysis = strings.TrimSpace(analysis)
+	if analysis == "" {
+		logger.Warnf(ctx, "Joint VLM analysis returned empty content for %d image(s)", len(imageBytesList))
+		return 0
+	}
+
+	labels := make([]string, 0, len(imageIndices))
+	for _, imageIndex := range imageIndices {
+		labels = append(labels, fmt.Sprintf("%d", imageIndex+1))
+	}
+	primaryIndex := imageIndices[0]
+	images[primaryIndex].Caption = fmt.Sprintf(
+		"【图片%s：联合辅助视觉报告】\n%s",
+		strings.Join(labels, "、"),
+		analysis,
+	)
+	for _, imageIndex := range imageIndices[1:] {
+		images[imageIndex].Caption = fmt.Sprintf(
+			"【图片%d】已纳入本轮多图联合辅助视觉分析；完整联合报告见本轮首张成功解析图片的说明。",
+			imageIndex+1,
+		)
+	}
+	return len(imageIndices)
 }
 
 func (h *Handler) analyzeImageAttachmentsWithPrompt(
@@ -116,12 +168,9 @@ func (h *Handler) analyzeImageAttachmentsWithPrompt(
 	analyzed := 0
 	for i := range images {
 		img := &images[i]
-		if img.Data == "" {
-			continue
-		}
-		imgBytes, _, decErr := decodeDataURI(img.Data)
-		if decErr != nil {
-			logger.Warnf(ctx, "Failed to decode image %d for VLM analysis: %v", i, decErr)
+		imgBytes, readErr := h.readImageBytesForAnalysis(ctx, *img)
+		if readErr != nil {
+			logger.Warnf(ctx, "Failed to read image %d for VLM analysis: %v", i, readErr)
 			continue
 		}
 		prompt := promptForImage(i)
@@ -143,6 +192,34 @@ func (h *Handler) analyzeImageAttachmentsWithPrompt(
 		}
 	}
 	return analyzed
+}
+
+// readImageBytesForAnalysis supports both inline images (IM/embed/API) and
+// pre-uploaded temporary image references (authenticated web chat).
+func (h *Handler) readImageBytesForAnalysis(ctx context.Context, image ImageAttachment) ([]byte, error) {
+	if image.Data != "" {
+		imageBytes, _, err := decodeDataURI(image.Data)
+		return imageBytes, err
+	}
+	if strings.TrimSpace(image.URL) == "" {
+		return nil, fmt.Errorf("image has neither inline data nor a stored URL")
+	}
+	reader, err := h.fileService.GetFile(ctx, image.URL)
+	if err != nil {
+		return nil, fmt.Errorf("open stored image: %w", err)
+	}
+	defer reader.Close()
+	imageBytes, err := io.ReadAll(io.LimitReader(reader, maxImageSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read stored image: %w", err)
+	}
+	if len(imageBytes) == 0 {
+		return nil, fmt.Errorf("stored image is empty")
+	}
+	if len(imageBytes) > maxImageSize {
+		return nil, fmt.Errorf("stored image exceeds %d bytes", maxImageSize)
+	}
+	return imageBytes, nil
 }
 
 // buildImageAnalysisPrompt generates a context-aware VLM prompt based on the

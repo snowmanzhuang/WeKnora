@@ -753,6 +753,25 @@ func TestEndStreamDisablesStreamingAndUpdatesSummary(t *testing.T) {
 	}
 }
 
+func TestFeishuStreamStateExpiresByInactivityInsteadOfTotalLifetime(t *testing.T) {
+	now := time.Now()
+	state := &feishuStreamState{
+		createdAt:  now.Add(-2 * streamOrphanTTL),
+		lastActive: now.Add(-time.Minute),
+	}
+
+	if state.inactiveSinceBefore(now.Add(-streamOrphanTTL)) {
+		t.Fatal("active long-running stream was treated as orphaned")
+	}
+
+	state.mu.Lock()
+	state.lastActive = now.Add(-streamOrphanTTL - time.Minute)
+	state.mu.Unlock()
+	if !state.inactiveSinceBefore(now.Add(-streamOrphanTTL)) {
+		t.Fatal("inactive stream was not treated as orphaned")
+	}
+}
+
 func TestEndStreamReturnsSettingsFailureAndKeepsState(t *testing.T) {
 	oldClient := httpClient
 	defer func() { httpClient = oldClient }()

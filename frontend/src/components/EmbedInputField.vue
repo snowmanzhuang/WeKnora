@@ -178,7 +178,7 @@ const addImageFiles = (files: File[]) => {
   const maxSize = 10 * 1024 * 1024
   for (const file of files) {
     if (!isEmbedImageFile(file)) continue
-    if (uploadedImages.value.length >= 5) {
+    if (uploadedImages.value.length >= 10) {
       embedToast(t('chat.imageTooMany'))
       break
     }

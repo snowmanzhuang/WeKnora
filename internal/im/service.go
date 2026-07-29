@@ -50,7 +50,7 @@ const (
 	// maxIMImageSize mirrors the web image-upload limit.
 	maxIMImageSize = 10 << 20
 	// maxIMImagesCount mirrors the web image-count limit.
-	maxIMImagesCount = 5
+	maxIMImagesCount = 10
 )
 
 // imageXMLBlockRe matches <image ...>...</image> blocks produced by
@@ -2885,8 +2885,9 @@ loop:
 		answer = appendIMAuthNotice(answer, notice)
 	}
 
-	if err := streamer.FinalizeStream(ctx, msg, streamID, finalDisplay); err != nil {
-		logger.Warnf(ctx, "[IM] FinalizeStream failed: %v", err)
+	finalizeErr := streamer.FinalizeStream(ctx, msg, streamID, finalDisplay)
+	if finalizeErr != nil {
+		logger.Warnf(ctx, "[IM] FinalizeStream failed: %v", finalizeErr)
 	}
 
 	// End the stream
@@ -2894,6 +2895,23 @@ loop:
 		logger.Warnf(ctx, "[IM] EndStream failed: %v", err)
 	}
 	streamFinished = true
+
+	// A long multimodal turn can outlive a platform-side or local stream state.
+	// Never leave the user with a half-rendered card: if the final full-content
+	// update failed, send a separate complete reply as a recovery path.
+	if finalizeErr != nil {
+		recoveryContent := "流式卡片未能继续更新，以下为完整回复：\n\n" + finalDisplay
+		recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		if err := adapter.SendReply(recoveryCtx, msg, &ReplyMessage{
+			Content: recoveryContent,
+			IsFinal: true,
+		}); err != nil {
+			logger.Warnf(recoveryCtx, "[IM] Failed to send complete reply after stream finalization error: %v", err)
+		} else {
+			logger.Infof(recoveryCtx, "[IM] Sent complete recovery reply after stream finalization error")
+		}
+		cancelRecovery()
+	}
 	sendIMOutboundImages(ctx, adapter, msg, outboundImages)
 
 	if answer == "" {

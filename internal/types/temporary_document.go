@@ -13,9 +13,11 @@ const (
 	TemporaryDocumentStatusReady      = "ready"
 	TemporaryDocumentStatusFailed     = "failed"
 
-	// MaxTemporaryAttachmentsPerMessage is the maximum number of pre-uploaded
-	// temporary attachment IDs a single QA turn may reference.
-	MaxTemporaryAttachmentsPerMessage = 5
+	// Temporary attachments share one ID list in the authenticated web client,
+	// while the image and ordinary-file pickers have independent limits.
+	MaxTemporaryImageAttachmentsPerMessage = 10
+	MaxTemporaryFileAttachmentsPerMessage  = 5
+	MaxTemporaryAttachmentsPerMessage      = MaxTemporaryImageAttachmentsPerMessage + MaxTemporaryFileAttachmentsPerMessage
 )
 
 // TemporaryDocument is a session-scoped, expiring document used by chat.

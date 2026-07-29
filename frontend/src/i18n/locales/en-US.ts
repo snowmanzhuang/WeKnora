@@ -3333,7 +3333,7 @@ export default {
     noAnswerContent: '(No answer content)',
     noMatchFound: 'No matching content found',
     deleteSessionFailed: 'Delete failed, please try again later!',
-    imageTooMany: 'Maximum 5 images allowed',
+    imageTooMany: 'Maximum 10 images allowed',
     imageTypeSizeError: 'Only JPG/PNG/GIF/WEBP under 10MB supported',
     imageUploadTooltip: 'Upload image (paste/drop supported)',
     attachmentUploadTooltip: 'Upload attachment (documents, audio, etc.)',

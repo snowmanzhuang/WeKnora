@@ -593,6 +593,8 @@ func (s *temporaryDocumentService) ResolveForPrompt(ctx context.Context, tenantI
 		perDocumentBudget = temporaryDocumentPromptBudget / len(documentIDs)
 	}
 	seen := make(map[string]struct{}, len(documentIDs))
+	imageCount := 0
+	fileCount := 0
 	for _, documentID := range documentIDs {
 		if _, duplicate := seen[documentID]; duplicate {
 			continue
@@ -611,6 +613,17 @@ func (s *temporaryDocumentService) ResolveForPrompt(ctx context.Context, tenantI
 			}
 			return nil, fmt.Errorf("attachment %s is still being processed", document.FileName)
 		}
+		if docparser.IsImageFormat(document.FileType) {
+			imageCount++
+			if imageCount > types.MaxTemporaryImageAttachmentsPerMessage {
+				return nil, fmt.Errorf("a message can use at most %d image attachments", types.MaxTemporaryImageAttachmentsPerMessage)
+			}
+		} else {
+			fileCount++
+			if fileCount > types.MaxTemporaryFileAttachmentsPerMessage {
+				return nil, fmt.Errorf("a message can use at most %d file attachments", types.MaxTemporaryFileAttachmentsPerMessage)
+			}
+		}
 		content, selected, total := selectTemporaryDocumentContentWithBudget(document, query, perDocumentBudget)
 		result.Attachments = append(result.Attachments, types.MessageAttachment{
 			ID: document.ID, URL: document.ResourceRef, FileName: document.FileName,
@@ -623,7 +636,7 @@ func (s *temporaryDocumentService) ResolveForPrompt(ctx context.Context, tenantI
 		// question is visual, to avoid gratuitous multimodal latency.
 		if docparser.IsImageFormat(document.FileType) || isVisualDocumentQuery(query) {
 			for _, image := range temporaryDocumentImageRefs(document.ImageRefs) {
-				if image.URL != "" && len(result.ImageURLs) < 4 {
+				if image.URL != "" && len(result.ImageURLs) < types.MaxTemporaryImageAttachmentsPerMessage {
 					result.ImageURLs = append(result.ImageURLs, image.URL)
 				}
 			}

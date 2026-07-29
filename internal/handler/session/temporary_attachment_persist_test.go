@@ -108,10 +108,13 @@ func TestPersistResolvedAttachmentContent_GuardsEmptyInput(t *testing.T) {
 
 func TestNormalizeTemporaryAttachmentIDs(t *testing.T) {
 	t.Run("rejects over limit before lookup", func(t *testing.T) {
-		ids := []string{"a", "b", "c", "d", "e", "f"}
+		ids := []string{
+			"01", "02", "03", "04", "05", "06", "07", "08",
+			"09", "10", "11", "12", "13", "14", "15", "16",
+		}
 		_, err := normalizeTemporaryAttachmentIDs(ids)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "at most 5")
+		assert.Contains(t, err.Error(), "at most 15")
 	})
 
 	t.Run("dedupes and drops empty", func(t *testing.T) {
@@ -121,8 +124,12 @@ func TestNormalizeTemporaryAttachmentIDs(t *testing.T) {
 	})
 
 	t.Run("allows max unique ids", func(t *testing.T) {
-		got, err := normalizeTemporaryAttachmentIDs([]string{"1", "2", "3", "4", "5"})
+		ids := []string{
+			"01", "02", "03", "04", "05", "06", "07", "08",
+			"09", "10", "11", "12", "13", "14", "15",
+		}
+		got, err := normalizeTemporaryAttachmentIDs(ids)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"1", "2", "3", "4", "5"}, got)
+		assert.Equal(t, ids, got)
 	})
 }

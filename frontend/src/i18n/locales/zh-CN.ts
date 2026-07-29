@@ -1089,7 +1089,7 @@ export default {
     noAnswerContent: "（无回答内容）",
     noMatchFound: "未找到匹配的内容",
     deleteSessionFailed: "删除失败，请稍后再试！",
-    imageTooMany: "最多上传5张图片",
+    imageTooMany: "最多上传10张图片",
     imageTypeSizeError: "仅支持 JPG/PNG/GIF/WEBP 格式，单张不超过 10MB",
     imageUploadTooltip: "上传图片（支持粘贴/拖拽）",
     attachmentUploadTooltip: "上传附件（文档、音频等）",

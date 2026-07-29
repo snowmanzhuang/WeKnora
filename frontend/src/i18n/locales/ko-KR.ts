@@ -1081,7 +1081,7 @@ export default {
     noAnswerContent: "(답변 내용 없음)",
     noMatchFound: "일치하는 내용을 찾을 수 없습니다",
     deleteSessionFailed: "삭제 실패, 나중에 다시 시도해주세요!",
-    imageTooMany: "최대 5장까지 업로드 가능합니다",
+    imageTooMany: "최대 10장까지 업로드 가능합니다",
     imageTypeSizeError: "JPG/PNG/GIF/WEBP 형식만 지원하며, 단일 파일 10MB 이하",
     imageUploadTooltip: "이미지 업로드 (붙여넣기/드래그 지원)",
     attachmentUploadTooltip: "첨부 파일 업로드 (문서, 오디오 등)",
