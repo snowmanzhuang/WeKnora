@@ -14,6 +14,11 @@ import (
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 )
 
+// rerankCandidateTopK is intentionally independent from EmbeddingTopK.
+// EmbeddingTopK=10 keeps the current vector/keyword retrieval pools unchanged,
+// while the top 20 fused candidates are allowed to reach the reranker.
+const rerankCandidateTopK = 20
+
 // PluginSearch implements search functionality for chat pipeline
 type PluginSearch struct {
 	knowledgeBaseService  interfaces.KnowledgeBaseService
@@ -419,6 +424,7 @@ func (p *PluginSearch) searchByTargets(
 						VectorThreshold:       chatManage.VectorThreshold,
 						KeywordThreshold:      chatManage.KeywordThreshold,
 						MatchCount:            chatManage.EmbeddingTopK,
+						FusionMatchCount:      rerankCandidateTopK,
 						SkipContextEnrichment: true,
 					}
 					res, err := p.knowledgeBaseService.HybridSearch(ctx, fullKBIDs[0], params)
@@ -491,6 +497,7 @@ func (p *PluginSearch) searchSingleTarget(
 		VectorThreshold:       vectorThreshold,
 		KeywordThreshold:      keywordThreshold,
 		MatchCount:            chatManage.EmbeddingTopK,
+		FusionMatchCount:      rerankCandidateTopK,
 		TagIDs:                t.TagIDs,
 		ScopeTagIDs:           t.ScopeTagIDs,
 		SkipContextEnrichment: true,

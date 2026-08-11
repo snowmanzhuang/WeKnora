@@ -606,7 +606,10 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 		return fmt.Errorf("get access token: %w", err)
 	}
 
-	replyContent := a.resolveMarkdownImages(ctx, accessToken, reply.Content)
+	// CardKit markdown does not render LaTeX delimiters. Downgrade only complete
+	// math spans at the Feishu/Lark boundary; all non-math content is preserved.
+	replyContent := normalizeFeishuMarkdownCompatibility(reply.Content)
+	replyContent = a.resolveMarkdownImages(ctx, accessToken, replyContent)
 	replyContent = normalizeFeishuImageCaptionSpacing(replyContent)
 	if shouldUseFeishuStaticCard(replyContent) {
 		cardID, cardErr := a.cardkitCreate(ctx, accessToken, buildStaticCardJSON(replyContent))
@@ -1030,7 +1033,8 @@ func (a *Adapter) UpdateStreamContent(ctx context.Context, incoming *im.Incoming
 	// Feishu card markdown only accepts an uploaded image_key inside ![alt](...),
 	// not an external HTTP/COS URL. Convert markdown image URLs to image_keys
 	// (uploading on demand) so the card update does not fail with 200570.
-	content := a.resolveMarkdownImages(ctx, accessToken, fullContent)
+	content := normalizeFeishuMarkdownCompatibility(fullContent)
+	content = a.resolveMarkdownImages(ctx, accessToken, content)
 	content = normalizeFeishuImageCaptionSpacing(content)
 
 	return a.cardkitUpdateElement(ctx, accessToken, streamID, streamingElementID, content, seq)

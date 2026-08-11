@@ -92,6 +92,9 @@ type KnowledgeService interface {
 	GetKnowledgeFile(ctx context.Context, id string) (io.ReadCloser, string, error)
 	// UpdateKnowledge updates knowledge information.
 	UpdateKnowledge(ctx context.Context, knowledge *types.Knowledge) error
+	// RegenerateChunkQuestions rebuilds the auxiliary questions for one text chunk
+	// and replaces that chunk's retrieval entries.
+	RegenerateChunkQuestions(ctx context.Context, chunkID string) ([]types.GeneratedQuestion, error)
 	// UpdateManualKnowledge updates manual Markdown knowledge content.
 	UpdateManualKnowledge(
 		ctx context.Context,

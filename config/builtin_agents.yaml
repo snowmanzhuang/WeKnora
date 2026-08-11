@@ -40,7 +40,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 20
       rerank_threshold: 0.3
       enable_query_expansion: true
       enable_rewrite: true
@@ -96,7 +96,7 @@ builtin_agents:
       embedding_top_k: 10
       keyword_threshold: 0.3
       vector_threshold: 0.5
-      rerank_top_k: 10
+      rerank_top_k: 20
       rerank_threshold: 0.3
 
   - id: "builtin-data-analyst"

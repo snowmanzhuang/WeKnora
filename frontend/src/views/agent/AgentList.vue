@@ -818,6 +818,7 @@ import { MessagePlugin, Icon as TIcon } from 'tdesign-vue-next'
 import { deleteAgent, copyAgent, type CustomAgent } from '@/api/agent'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { formatStringDate } from '@/utils/index'
+import { compareNumberedNames } from '@/utils/numbered-name-sort'
 import { useI18n } from 'vue-i18n'
 import { createSessions } from '@/api/chat/index'
 import { useOrganizationStore } from '@/stores/organization'
@@ -1008,7 +1009,8 @@ const filteredAgents = computed<DisplayAgent[]>(() => {
   const sortedShared = [...sharedAgents.value].sort((a, b) => {
     const aE = isSharedAgentEditable(a.permission) ? 0 : 1
     const bE = isSharedAgentEditable(b.permission) ? 0 : 1
-    return aE - bE
+    if (aE !== bE) return aE - bE
+    return compareNumberedNames(a.agent?.name ?? '', b.agent?.name ?? '')
   })
   sortedShared.forEach(shared => {
     if (!shared.agent) return
@@ -1049,7 +1051,8 @@ const sortedSpaceAgentsList = computed(() => {
     if (aMine !== bMine) return aMine - bMine
     const aE = isSharedAgentEditable(a.permission) ? 0 : 1
     const bE = isSharedAgentEditable(b.permission) ? 0 : 1
-    return aE - bE
+    if (aE !== bE) return aE - bE
+    return compareNumberedNames(a.agent?.name ?? '', b.agent?.name ?? '')
   })
 })
 const loading = ref(false)

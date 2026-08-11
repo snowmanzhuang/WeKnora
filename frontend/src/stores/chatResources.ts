@@ -5,6 +5,7 @@ import { listAgents, type CustomAgent } from '@/api/agent'
 import { listModels, type ModelConfig } from '@/api/model'
 import { listWebSearchProviders, type WebSearchProviderEntity } from '@/api/web-search-provider'
 import { useOrganizationStore } from '@/stores/organization'
+import { sortByNumberedName } from '@/utils/numbered-name-sort'
 
 /** 空间级资源缓存 TTL */
 const CACHE_TTL_MS = 60_000
@@ -120,7 +121,10 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
         orgStore.fetchSharedAgents({ force }),
       ])
       const res = agentsRes as { data?: CustomAgent[]; disabled_own_agent_ids?: string[] }
-      return { data: res.data || [], disabled_own_agent_ids: res.disabled_own_agent_ids || [] }
+      return {
+        data: sortByNumberedName(res.data || [], (agent) => agent.name),
+        disabled_own_agent_ids: res.disabled_own_agent_ids || [],
+      }
     }
 
     if (!force && isFresh('agents')) {
@@ -136,7 +140,7 @@ export const useChatResourcesStore = defineStore('chatResources', () => {
           orgStore.fetchSharedAgents({ force }),
         ])
         const res = agentsRes as { data?: CustomAgent[]; disabled_own_agent_ids?: string[] }
-        const data = res.data || []
+        const data = sortByNumberedName(res.data || [], (agent) => agent.name)
         agents.value = data
         disabledOwnAgentIds.value = res.disabled_own_agent_ids || []
         loadedAt.value.agents = Date.now()

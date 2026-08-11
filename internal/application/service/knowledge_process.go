@@ -1936,7 +1936,10 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 		},
 	}, &chat.ChatOptions{
 		Temperature: 0.7,
-		MaxTokens:   512,
+		// Reasoning-capable providers may spend several hundred completion
+		// tokens before emitting the two requested lines. A 512-token ceiling
+		// can therefore yield an empty final answer despite a successful call.
+		MaxTokens: 2048,
 		Thinking:    &thinking,
 	})
 	if err != nil {
@@ -1962,6 +1965,91 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 	}
 
 	return questions, nil
+}
+
+// RegenerateChunkQuestions synchronously refreshes the auxiliary questions for
+// one text chunk and replaces all retrieval entries associated with that chunk.
+// It is intentionally scoped to a single chunk so successful neighbors are not
+// regenerated and their vectors cannot be duplicated.
+func (s *knowledgeService) RegenerateChunkQuestions(
+	ctx context.Context, chunkID string,
+) ([]types.GeneratedQuestion, error) {
+	tenantID := types.MustTenantIDFromContext(ctx)
+	chunk, err := s.chunkRepo.GetChunkByID(ctx, tenantID, chunkID)
+	if err != nil {
+		return nil, err
+	}
+	if chunk.ChunkType != types.ChunkTypeText {
+		return nil, fmt.Errorf("questions can only be generated for text chunks")
+	}
+	if strings.TrimSpace(chunk.Content) == "" {
+		return nil, fmt.Errorf("questions cannot be generated for an empty chunk")
+	}
+
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, chunk.KnowledgeID)
+	if err != nil {
+		return nil, err
+	}
+	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, chunk.KnowledgeBaseID)
+	if err != nil {
+		return nil, err
+	}
+	if kb.SummaryModelID == "" {
+		return nil, fmt.Errorf("summary model is required for question generation")
+	}
+	chatModel, err := s.modelService.GetChatModel(ctx, kb.SummaryModelID)
+	if err != nil {
+		return nil, err
+	}
+
+	resolveNeighbor := func(id string) string {
+		if id == "" {
+			return ""
+		}
+		neighbor, getErr := s.chunkRepo.GetChunkByID(ctx, tenantID, id)
+		if getErr != nil {
+			return ""
+		}
+		return neighbor.Content
+	}
+	processOverrides, _ := knowledge.ProcessOverrides()
+	config := ResolveProcessConfig(kb, processOverrides).QuestionGenerationConfig
+	count := config.QuestionCount
+	if count <= 0 {
+		count = 3
+	}
+	if count > 10 {
+		count = 10
+	}
+
+	questions, err := s.generateQuestionsWithContext(
+		ctx, chatModel, chunk.Content, resolveNeighbor(chunk.PreChunkID),
+		resolveNeighbor(chunk.NextChunkID), knowledge.Title, count, config.CustomInstructions,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(questions) != count {
+		return nil, fmt.Errorf("question model returned %d questions; expected %d", len(questions), count)
+	}
+
+	generated := make([]types.GeneratedQuestion, 0, len(questions))
+	for i, question := range questions {
+		generated = append(generated, types.GeneratedQuestion{
+			ID:       fmt.Sprintf("q%d", time.Now().UnixNano()+int64(i)),
+			Question: question,
+		})
+	}
+	if err := chunk.SetDocumentMetadata(&types.DocumentChunkMetadata{GeneratedQuestions: generated}); err != nil {
+		return nil, err
+	}
+	if err := s.chunkService.UpdateChunk(ctx, chunk); err != nil {
+		return nil, err
+	}
+	if err := s.updateChunkVector(ctx, chunk.KnowledgeBaseID, []*types.Chunk{chunk}); err != nil {
+		return nil, err
+	}
+	return generated, nil
 }
 
 // ReparseKnowledge deletes existing document content and re-parses the knowledge asynchronously.
@@ -2394,6 +2482,26 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
 			IsEnabled:       true,
 		})
+		meta, metaErr := chunk.DocumentMetadata()
+		if metaErr != nil {
+			return metaErr
+		}
+		if meta != nil {
+			for _, question := range meta.GeneratedQuestions {
+				if strings.TrimSpace(question.Question) == "" {
+					continue
+				}
+				indexInfo = append(indexInfo, &types.IndexInfo{
+					Content:         question.Question,
+					SourceID:        fmt.Sprintf("%s-%s", chunk.ID, question.ID),
+					SourceType:      types.ChunkSourceType,
+					ChunkID:         chunk.ID,
+					KnowledgeID:     chunk.KnowledgeID,
+					KnowledgeBaseID: chunk.KnowledgeBaseID,
+					IsEnabled:       true,
+				})
+			}
+		}
 		ids = append(ids, chunk.ID)
 	}
 

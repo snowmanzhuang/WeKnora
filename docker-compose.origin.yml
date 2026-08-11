@@ -1,7 +1,7 @@
 services:
   frontend:
-    # image: wechatopenai/weknora-ui:${WEKNORA_VERSION:-latest}
-    # Requirs frontend/dist — run ./scripts/build_frontend_dist.sh before --build
+    image: wechatopenai/weknora-ui:${WEKNORA_VERSION:-latest}
+    # Requires frontend/dist — run ./scripts/build_frontend_dist.sh before --build
     build:
       context: ./frontend
     container_name: WeKnora-frontend
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   app:
-    # image: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
+    image: wechatopenai/weknora-app:${WEKNORA_VERSION:-latest}
     build:
       context: .
       dockerfile: docker/Dockerfile.app
@@ -35,8 +35,8 @@ services:
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
-      - ./data-files:/data/files
-      - ./docreader-tmp:/tmp/docreader:ro
+      - data-files:/data/files
+      - docreader-tmp:/tmp/docreader:ro
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
       - ./skills/preloaded:/app/skills/preloaded
@@ -374,7 +374,7 @@ services:
     restart: "no"
 
   docreader:
-    # image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
+    image: wechatopenai/weknora-docreader:${WEKNORA_VERSION:-latest}
     build:
       context: .
       dockerfile: docker/Dockerfile.docreader
@@ -390,7 +390,7 @@ services:
     expose:
       - "50051"
     volumes:
-      - ./docreader-tmp:/tmp/docreader
+      - docreader-tmp:/tmp/docreader
     environment:
       # ========== 基础 ==========
       - TZ=${TZ:-Asia/Shanghai}
@@ -477,35 +477,34 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # OpenDataLoader hybrid backend (optional). Default --no-ocr (no EasyOCR/libGL).
+  # Local build only — not published to Docker Hub; use --profile odl-hybrid --build.
+  odl-hybrid:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.odl-hybrid
+    image: weknora-odl-hybrid:local
+    container_name: WeKnora-odl-hybrid
+    profiles:
+      - odl-hybrid
+    expose:
+      - "5002"
+    environment:
+      - ODL_HYBRID_EXTRA_ARGS=${ODL_HYBRID_EXTRA_ARGS:---no-ocr}
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
 
   # 修改的PostgreSQL配置
   postgres:
     image: paradedb/paradedb:v0.22.2-pg17
     container_name: WeKnora-postgres
-    # Parallel HNSW builds allocate maintenance memory through /dev/shm.
-    # Docker's small default shared-memory mount is insufficient for this dataset.
-    shm_size: ${POSTGRES_SHM_SIZE:-8gb}
-    # Keep PostgreSQL tuning in Compose so a recreated container retains it.
-    # Defaults are conservative for the current Docker Desktop VM (~47 GiB RAM)
-    # and can be overridden from .env without editing this file.
-    command:
-      - postgres
-      - -c
-      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-8GB}
-      - -c
-      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-24GB}
-      - -c
-      - work_mem=${POSTGRES_WORK_MEM:-16MB}
-      - -c
-      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-1GB}
     environment:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_DB=${DB_NAME}
     volumes:
-      - ./postgres-data:/var/lib/postgresql/data
-    ports:
-      - 5432:5432
+      - postgres-data:/var/lib/postgresql/data
     networks:
       - WeKnora-network
     healthcheck:
@@ -521,41 +520,503 @@ services:
   redis:
     image: redis:7.0-alpine
     container_name: WeKnora-redis
-    ports:
-      - 6379:6379
-    volumes:
-      - ./redis-data:/data
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     restart: always
     networks:
       - WeKnora-network
 
-  # mcp:
-  #   build:
-  #     context: ./mcp-server
-  #   container_name: WeKnora-mcp
-  #   ports:
-  #     - "${MCP_PORT:-8082}:8000"
-  #   environment:
-  #     - WEKNORA_BASE_URL=http://app:8080/api/v1
-  #     - WEKNORA_API_KEY=${WEKNORA_API_KEY:-}
-  #     # HTTP/SSE 传输必填：mcp-server 启动时若缺少此项会拒绝启动（客户端以 Authorization: Bearer 携带）
-  #     - MCP_SERVER_AUTH_TOKEN=${MCP_SERVER_AUTH_TOKEN:-}
-  #     # 调用 WeKnora REST 的读超时（秒，默认 300）
-  #     - WEKNORA_CHAT_TIMEOUT=${WEKNORA_CHAT_TIMEOUT:-300}
-  #     # 是否校验 WeKnora 后端 TLS 证书（默认 true；自签证书可设 false）
-  #     - WEKNORA_VERIFY_SSL=${WEKNORA_VERIFY_SSL:-true}
-  #     # 允许上传的目录白名单（逗号分隔；留空禁用文件上传工具）
-  #     - MCP_ALLOWED_UPLOAD_DIRS=${MCP_ALLOWED_UPLOAD_DIRS:-}
-  #   depends_on:
-  #     app:
-  #       condition: service_healthy
-  #   networks:
-  #     - WeKnora-network
-  #   restart: unless-stopped
-  #   profiles:
-  #     - full
+  # One-shot init: copy the read-only template settings.yml into a named volume
+  # before searxng starts. Necessary because the searxng entrypoint sed-replaces
+  # `ultrasecretkey` in /etc/searxng/settings.yml in place; bind-mounting the
+  # repo file directly would write the resolved SEARXNG_SECRET back into the
+  # working tree (and prevent re-templating on subsequent restarts).
+  searxng-init:
+    image: busybox:1.36
+    container_name: WeKnora-searxng-init
+    command: ["sh", "-c", "cp /template/settings.yml /etc/searxng/settings.yml && chmod 0644 /etc/searxng/settings.yml"]
+    volumes:
+      - ./docker/searxng/settings.yml:/template/settings.yml:ro
+      - searxng_config:/etc/searxng
+    restart: "no"
+    networks:
+      - WeKnora-network
+    profiles:
+      - searxng
+      - full
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: WeKnora-searxng
+    # Bind to loopback by default; override SEARXNG_BIND=0.0.0.0 only after
+    # rotating SEARXNG_SECRET and (optionally) re-enabling limiter in settings.yml.
+    ports:
+      - "${SEARXNG_BIND:-127.0.0.1}:${SEARXNG_PORT:-8888}:8080"
+    volumes:
+      - searxng_config:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT:-8888}/
+      - INSTANCE_NAME=weknora-searxng
+      # Default value lets `docker compose --profile searxng up` work zero-config.
+      # Override via .env (e.g. `openssl rand -hex 32`) before exposing the
+      # instance beyond the default 127.0.0.1 bind, since secret_key signs
+      # image-proxy URLs and a shared default would be guessable by anyone.
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-weknora-default-searxng-secret-rotate-before-exposing-publicly}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    restart: unless-stopped
+    depends_on:
+      searxng-init:
+        condition: service_completed_successfully
+    networks:
+      - WeKnora-network
+    profiles:
+      - searxng
+      - full
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: WeKnora-minio
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY_ID:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_ACCESS_KEY:-minioadmin}
+    command: server --console-address ":9001" /data
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - WeKnora-network
+    profiles:
+      - minio
+      - full
+
+  neo4j:
+    image: neo4j:2025.10.1
+    container_name: WeKnora-neo4j
+    volumes:
+      - neo4j-data:/data
+    environment:
+      - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-password}
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4JLABS_PLUGINS=["apoc"]
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    restart: always
+    networks:
+      - WeKnora-network
+    profiles:
+      - neo4j
+      - full
+
+  qdrant:
+    image: qdrant/qdrant:v1.16.2
+    container_name: WeKnora-qdrant
+    ports:
+      - "${QDRANT_REST_PORT:-6333}:6333"
+      - "${QDRANT_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - qdrant
+      - full
+
+  milvus:
+    image: milvusdb/milvus:v2.6.11
+    container_name: WeKnora-milvus
+    security_opt:
+      - seccomp:unconfined
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - ETCD_USE_EMBED=true
+      - ETCD_DATA_DIR=/var/lib/milvus/etcd
+      - COMMON_STORAGETYPE=local
+      - DEPLOY_MODE=STANDALONE
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - milvus
+
+  weaviate:
+    image: semitechnologies/weaviate:1.28.4
+    container_name: WeKnora-weaviate
+    environment:
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - CLUSTER_HOSTNAME=node1
+      - DEFAULT_VECTORIZER_MODULE=none
+      - ENABLE_MODULES=none
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - CLUSTER_GOSSIP_BIND_PORT=7000
+      - CLUSTER_DATA_BIND_PORT=7001
+      - RAFT_BOOTSTRAP_EXPECT=1
+    ports:
+      - "9035:8080"
+      - "50052:50051"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - weaviate
+
+  # ---------------------------------------------------------------------------
+  # Apache Doris 4.1（FE + BE 单实例 standalone 部署，opt-in via `--profile doris`）
+  #
+  # 版本要求：必须 >= 3.0（HNSW ANN 索引、cosine_distance_approximate、
+  # Stream Load partial_columns）。本 compose 使用 4.1 官方稳定 tag。
+  #
+  # 端口说明：
+  #   - 9030 (FE MySQL)：WeKnora 主链路读写、SQL 查询都走此端口。
+  #   - 8030 (FE HTTP)：Stream Load partial update 入口。
+  #   - 8040 (BE)     ：BE 心跳与数据传输；FE 会把 stream load 重定向到 BE。
+  #
+  # 启用方式：
+  #   docker compose --profile doris up -d
+  #
+  # 数据持久化在 doris_fe_data / doris_be_data 卷中。
+  # ---------------------------------------------------------------------------
+  doris-fe:
+    image: apache/doris:fe-4.1.0
+    container_name: WeKnora-doris-fe
+    hostname: doris-fe
+    environment:
+      - FE_SERVERS=fe1:doris-fe:9010
+      - FE_ID=1
+    ports:
+      - "${DORIS_FE_HTTP_PORT:-8030}:8030"
+      - "${DORIS_FE_MYSQL_PORT:-9030}:9030"
+    volumes:
+      - doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - doris_fe_log:/opt/apache-doris/fe/log
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - doris
+
+  doris-be:
+    image: apache/doris:be-4.1.0
+    container_name: WeKnora-doris-be
+    hostname: doris-be
+    environment:
+      - FE_SERVERS=fe1:doris-fe:9010
+      - BE_ADDR=doris-be:9050
+    depends_on:
+      - doris-fe
+    ports:
+      - "${DORIS_BE_HTTP_PORT:-8040}:8040"
+    volumes:
+      - doris_be_storage:/opt/apache-doris/be/storage
+      - doris_be_log:/opt/apache-doris/be/log
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - doris
+
+  dex:
+    image: dexidp/dex:latest
+    container_name: dex
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./misc/dex-config.yaml:/etc/dex/config.yaml
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    profiles:
+      - dex
+      - full
+
+  # ---------------------------------------------------------------------------
+  # Langfuse 自建可观测栈 (opt-in via `--profile langfuse`)
+  #
+  # 为了最小化资源占用，Langfuse 会复用 WeKnora 已有的 postgres 和 redis：
+  #   - postgres：在 WeKnora-postgres 中创建独立的 "langfuse" 数据库
+  #   - redis  ：复用 WeKnora-redis 的 DB 1（WeKnora 自己用 DB 0）
+  # 需要新增的只有 Langfuse 应用自身 + ClickHouse（OLAP）+ 专用 MinIO（事件/媒体 S3）。
+  #
+  # 启用方式：
+  #   docker compose --profile langfuse up -d
+  # 启用后：
+  #   1. Langfuse UI: http://localhost:3000 （首次访问注册管理员并在 Settings → API Keys 生成 key）
+  #   2. 在 .env 里把 LANGFUSE_HOST 改成 http://langfuse-web:3000（容器间通信）
+  #      并填入刚生成的 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+  #   3. 重启 app 容器：docker compose up -d app
+  # 相关默认密码已写成占位符，生产部署务必用 openssl rand 重新生成！
+  # ---------------------------------------------------------------------------
+
+  # 一次性初始化脚本：在已有的 WeKnora-postgres 里创建 langfuse 数据库（幂等，数据库已存在则跳过）
+  # 复用 WeKnora-postgres 的 ParadeDB 镜像，避免多拉一个 postgres 镜像
+  langfuse-db-init:
+    image: paradedb/paradedb:v0.22.2-pg17
+    container_name: WeKnora-langfuse-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+    # ${LANGFUSE_DB_NAME:-langfuse} / ${DB_USER} 由 compose 解析成字面量后再传给 shell；
+    # 脚本中需要 shell 自己展开的变量（无）一律用 $$ 转义。
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "[langfuse-db-init] ensuring database '${LANGFUSE_DB_NAME:-langfuse}' exists in WeKnora-postgres..."
+        # 先刷新现有库的 collation（镜像 ICU 2.36 与宿主 2.41 不匹配时必须做），否则 CREATE DATABASE 会失败
+        psql -h postgres -U ${DB_USER} -d postgres -v ON_ERROR_STOP=0 -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;" >/dev/null 2>&1 || true
+        psql -h postgres -U ${DB_USER} -d postgres -v ON_ERROR_STOP=0 -c "ALTER DATABASE postgres REFRESH COLLATION VERSION;" >/dev/null 2>&1 || true
+        # 幂等创建：已存在则跳过；不存在则从 template0 克隆（template0 永远不会有 collation 漂移）
+        if psql -h postgres -U ${DB_USER} -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${LANGFUSE_DB_NAME:-langfuse}'" | grep -q 1; then
+          echo "[langfuse-db-init] database '${LANGFUSE_DB_NAME:-langfuse}' already exists, skipping."
+        else
+          psql -h postgres -U ${DB_USER} -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${LANGFUSE_DB_NAME:-langfuse}\" TEMPLATE template0;"
+          echo "[langfuse-db-init] database '${LANGFUSE_DB_NAME:-langfuse}' created."
+        fi
+        echo "[langfuse-db-init] done."
+    networks:
+      - WeKnora-network
+    restart: "no"
+    profiles:
+      - langfuse
+      - full
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: WeKnora-langfuse-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - WeKnora-network
+    profiles:
+      - langfuse
+      - full
+
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: WeKnora-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    # 启动前创建 `langfuse` 桶，Langfuse 开箱即用
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_USER:-langfuseminio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:-langfuseminiosecret}
+    ports:
+      # 9100：S3 API（浏览器上传媒体时会直连此端口，必须对外暴露）
+      - "${LANGFUSE_MINIO_S3_PORT:-9100}:9000"
+      # 9101：MinIO 控制台（可选，方便排障）
+      - "${LANGFUSE_MINIO_CONSOLE_PORT:-9101}:9001"
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    networks:
+      - WeKnora-network
+    profiles:
+      - langfuse
+      - full
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: WeKnora-langfuse-worker
+    restart: unless-stopped
+    depends_on: &langfuse-depends-on
+      # 复用 WeKnora 已有的 postgres/redis，需要先完成 langfuse 数据库的创建
+      langfuse-db-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    # 用 wrapper entrypoint：在容器启动时把 DB_PASSWORD / REDIS_PASSWORD 做 URL 编码，
+    # 避免 DB_PASSWORD 含 '@' / '#' 等字符导致 Prisma 无法解析 DATABASE_URL (P1013)。
+    # Langfuse 镜像基于 Node.js，直接用 node 的 encodeURIComponent，不引外部依赖。
+    # 注意：compose 覆盖 entrypoint 会清空镜像默认 CMD，因此在 wrapper 末尾写死 exec 的原始命令。
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        _enc() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$$1"; }
+        DU=$$(_enc "$$_LF_DB_USER")
+        DP=$$(_enc "$$_LF_DB_PASSWORD")
+        RP=$$(_enc "$$_LF_REDIS_PASSWORD")
+        export DATABASE_URL="postgresql://$$DU:$$DP@postgres:5432/$$_LF_DB_NAME"
+        export REDIS_CONNECTION_STRING="redis://:$$RP@redis:6379/$$_LF_REDIS_DB"
+        unset _LF_DB_USER _LF_DB_PASSWORD _LF_REDIS_PASSWORD
+        exec dumb-init -- ./worker/entrypoint.sh node worker/dist/index.js
+    environment: &langfuse-env
+      # 原始凭证（未 URL 编码），由 entrypoint wrapper 读取并组装成 DATABASE_URL / REDIS_CONNECTION_STRING
+      _LF_DB_USER: ${DB_USER}
+      _LF_DB_PASSWORD: ${DB_PASSWORD}
+      _LF_DB_NAME: ${LANGFUSE_DB_NAME:-langfuse}
+      _LF_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      _LF_REDIS_DB: ${LANGFUSE_REDIS_DB:-1}
+      # SALT / ENCRYPTION_KEY 生产环境务必重新生成：
+      #   SALT: openssl rand -base64 32
+      #   ENCRYPTION_KEY: openssl rand -hex 32
+      SALT: ${LANGFUSE_SALT:-weknora-langfuse-dev-salt-change-me}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-weknora-langfuse-dev-nextauth-secret-change-me}
+      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-langfuseminio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-langfuseminiosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_USER:-langfuseminio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD:-langfuseminiosecret}
+      # 媒体上传用的外部 endpoint（浏览器直连），默认指向宿主机映射的 9100 端口
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9100}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+    networks:
+      - WeKnora-network
+    profiles:
+      - langfuse
+      - full
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: WeKnora-langfuse-web
+    restart: unless-stopped
+    depends_on: *langfuse-depends-on
+    ports:
+      - "${LANGFUSE_WEB_PORT:-3000}:3000"
+    # 同样走 wrapper entrypoint，末尾写死 web 的原始启动命令（见镜像 Dockerfile 的 CMD）
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        _enc() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$$1"; }
+        DU=$$(_enc "$$_LF_DB_USER")
+        DP=$$(_enc "$$_LF_DB_PASSWORD")
+        RP=$$(_enc "$$_LF_REDIS_PASSWORD")
+        export DATABASE_URL="postgresql://$$DU:$$DP@postgres:5432/$$_LF_DB_NAME"
+        export REDIS_CONNECTION_STRING="redis://:$$RP@redis:6379/$$_LF_REDIS_DB"
+        unset _LF_DB_USER _LF_DB_PASSWORD _LF_REDIS_PASSWORD
+        if [ -n "$$NEXT_PUBLIC_LANGFUSE_CLOUD_REGION" ]; then
+          exec dumb-init -- ./web/entrypoint.sh node --import dd-trace/initialize.mjs ./web/server.js --keepAliveTimeout 110000
+        else
+          exec dumb-init -- ./web/entrypoint.sh node ./web/server.js --keepAliveTimeout 110000
+        fi
+    environment:
+      <<: *langfuse-env
+      # 可选：首次启动时自动创建组织、项目和管理员（填了就不用在 UI 上手动注册）
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+    networks:
+      - WeKnora-network
+    profiles:
+      - langfuse
+      - full
+
+  mcp:
+    build:
+      context: ./mcp-server
+    container_name: WeKnora-mcp
+    ports:
+      - "${MCP_PORT:-8082}:8000"
+    environment:
+      - WEKNORA_BASE_URL=http://app:8080/api/v1
+      - WEKNORA_API_KEY=${WEKNORA_API_KEY:-}
+      # HTTP/SSE 传输必填：mcp-server 启动时若缺少此项会拒绝启动（客户端以 Authorization: Bearer 携带）
+      - MCP_SERVER_AUTH_TOKEN=${MCP_SERVER_AUTH_TOKEN:-}
+      # 调用 WeKnora REST 的读超时（秒，默认 300）
+      - WEKNORA_CHAT_TIMEOUT=${WEKNORA_CHAT_TIMEOUT:-300}
+      # 是否校验 WeKnora 后端 TLS 证书（默认 true；自签证书可设 false）
+      - WEKNORA_VERIFY_SSL=${WEKNORA_VERIFY_SSL:-true}
+      # 允许上传的目录白名单（逗号分隔；留空禁用文件上传工具）
+      - MCP_ALLOWED_UPLOAD_DIRS=${MCP_ALLOWED_UPLOAD_DIRS:-}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
+    profiles:
+      - full
 
 networks:
   WeKnora-network:
     driver: bridge
+
+volumes:
+  postgres-data:
+  data-files:
+  docreader-tmp:
+  minio_data:
+  neo4j-data:
+  qdrant_data:
+  milvus_data:
+  weaviate_data:
+  doris_fe_meta:
+  doris_fe_log:
+  doris_be_storage:
+  doris_be_log:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  searxng_config:

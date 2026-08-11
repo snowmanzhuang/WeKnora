@@ -36,6 +36,23 @@ func NewChunkHandler(service interfaces.ChunkService, kgService interfaces.Knowl
 	return &ChunkHandler{service: service, kgService: kgService}
 }
 
+// RegenerateGeneratedQuestions refreshes the generated questions and retrieval
+// vectors for a single text chunk.
+func (h *ChunkHandler) RegenerateGeneratedQuestions(c *gin.Context) {
+	chunkID := secutils.SanitizeForLog(c.Param("id"))
+	if chunkID == "" {
+		c.Error(errors.NewBadRequestError("Chunk ID is required"))
+		return
+	}
+
+	items, err := h.kgService.RegenerateChunkQuestions(c.Request.Context(), chunkID)
+	if err != nil {
+		c.Error(errors.NewBadRequestError(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": items})
+}
+
 // GetChunkByIDOnly godoc
 // @Summary      通过ID获取分块
 // @Description  仅通过分块ID获取分块详情（不需要knowledge_id）；支持共享知识库下的分块访问

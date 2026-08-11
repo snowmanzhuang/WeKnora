@@ -15,6 +15,12 @@ func TestSummaryBotChannelAndMentionRecognition(t *testing.T) {
 	if !isSpecialtyChannel(&IMChannel{Name: "07神经眼科"}) {
 		t.Fatal("specialty channel was not recognized")
 	}
+	if !isSpecialtyChannel(&IMChannel{Name: "24眼科临床指南与专家共识"}) {
+		t.Fatal("24 specialty channel was not recognized")
+	}
+	if isSpecialtyChannel(&IMChannel{Name: "99病例推理机器人"}) {
+		t.Fatal("99 reasoning channel must not be treated as a specialty channel")
+	}
 	msg := &IncomingMessage{
 		Mentions: []IncomingMention{
 			{Name: "00汇总机器人"},
@@ -152,20 +158,24 @@ func TestBuildKnowledgeBaseRoutesAndRequiredMentions(t *testing.T) {
 	kbs := []*types.KnowledgeBase{
 		{ID: "kb03", Name: "03眼底内科", Description: "眼底疾病"},
 		{ID: "kb01", Name: "01眼科综合", Description: "眼科综合"},
+		{ID: "kb24", Name: "24眼科临床指南与专家共识", Description: "最新临床指南与专家共识"},
 		{ID: "kb00", Name: "00汇总机器人"},
+		{ID: "kb99", Name: "99病例推理机器人"},
 		{ID: "other", Name: "未编号知识库"},
 	}
 	routes := buildKnowledgeBaseRoutes(kbs)
-	if len(routes) != 2 || routes[0].Code != "01" || routes[1].Code != "03" {
+	if len(routes) != 3 || routes[0].Code != "01" || routes[1].Code != "03" || routes[2].Code != "24" {
 		t.Fatalf("unexpected routes: %#v", routes)
 	}
 
 	codes, ids := requiredRoutesFromMentions([]IncomingMention{
 		{Name: "03眼底内科"},
+		{Name: "24眼科临床指南与专家共识"},
 		{Name: "00汇总机器人"},
 		{Name: "03眼底内科"},
 	}, routes)
-	if len(codes) != 1 || codes[0] != "03" || len(ids) != 1 || ids[0] != "kb03" {
+	if len(codes) != 2 || codes[0] != "03" || codes[1] != "24" ||
+		len(ids) != 2 || ids[0] != "kb03" || ids[1] != "kb24" {
 		t.Fatalf("unexpected required routes: codes=%#v ids=%#v", codes, ids)
 	}
 }
@@ -209,6 +219,8 @@ func TestCloneSummaryAgentForcesQuickAnswerAndNoWeb(t *testing.T) {
 		"01眼科综合",
 		"07神经眼科",
 		"explicitly @mentioned specialist codes 07",
+		"必须将24号眼科临床指南和专家共识知识库纳入知识库检索范围中",
+		"include both code 24 and the relevant subspecialty code or codes",
 		"knowledge_base_codes",
 	} {
 		if !strings.Contains(cloned.Config.RewritePromptSystem, want) {

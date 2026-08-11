@@ -318,6 +318,8 @@ func RegisterChunkRoutes(r *gin.RouterGroup, handler *handler.ChunkHandler, g *r
 		// 「能编辑所有 chunk 的同样规则在这条路由上反而更宽松」的不一致。
 		// 现在通过 KBCreatorLookupFromChunkIDParam 把那一跳补上，统一矩阵。
 		chunks.DELETE("/by-id/:id/questions", g.OwnedChunkKBOrAdminFromChunkID(), g.KBAccessWriteFromChunkIDParam("id"), handler.DeleteGeneratedQuestion)
+		// 重新生成单个分块的问题，并原子替换该分块的检索向量。
+		chunks.POST("/by-id/:id/questions/regenerate", g.OwnedChunkKBOrAdminFromChunkID(), g.KBAccessWriteFromChunkIDParam("id"), handler.RegenerateGeneratedQuestions)
 	}
 }
 

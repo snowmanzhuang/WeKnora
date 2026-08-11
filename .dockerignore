@@ -50,6 +50,10 @@ cmd/desktop/build/bin/
 # 本地数据 / 模型文件
 /models/
 data/files/
+data-files/
+postgres-data/
+redis-data/
+docreader-tmp/
 data/*.db
 data/*.db-wal
 data/*.db-shm

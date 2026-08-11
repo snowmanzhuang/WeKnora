@@ -16,7 +16,7 @@ ENV GOSUMDB=${GOSUMDB_ARG}
 
 # Install dependencies
 RUN if [ -n "$APK_MIRROR_ARG" ]; then \
-        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+        sed -i "s@http://deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
     apt-get install -y git build-essential libsqlite3-dev
@@ -26,7 +26,7 @@ RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate
 
 # Copy go mod and sum files
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download -x
 COPY cmd/download cmd/download
 RUN go run cmd/download/duckdb/duckdb.go
 COPY . .
@@ -57,18 +57,15 @@ ARG APK_MIRROR_ARG
 # Create a non-root user first
 RUN useradd -m -s /bin/bash appuser
 
-# First, install ca-certificates. Use the configured mirror here too so builds
-# do not depend on deb.debian.org being reachable from the local network.
-RUN if [ -n "$APK_MIRROR_ARG" ]; then \
-        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
-    fi && \
-    apt-get update && \
+# First, install ca-certificates from the base image's bootstrap source. HTTPS
+# mirrors cannot be verified until this package is present.
+RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Then switch to mirror if specified and install other packages
 RUN if [ -n "$APK_MIRROR_ARG" ]; then \
-        sed -i "s@deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
+        sed -i "s@http://deb.debian.org@${APK_MIRROR_ARG}@g" /etc/apt/sources.list.d/debian.sources; \
     fi && \
     apt-get update && \
     apt-get install -y --no-install-recommends \

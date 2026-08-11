@@ -440,6 +440,15 @@ func TestNormalizeFeishuImageCaptionSpacing_RemovesSingleSourceNewline(t *testin
 	}
 }
 
+func TestNormalizeFeishuImageCaptionSpacing_KeepsTranslatedCaptionBelowImageWithoutGap(t *testing.T) {
+	input := "![图4-2：视网膜改变](img_test_inline)\n\n**图4-2：视网膜改变** <kb doc=\"book.pdf\" chunk_id=\"chunk-1\" kb_id=\"kb-1\" />"
+	want := "![图4-2：视网膜改变](img_test_inline)**图4-2：视网膜改变** <kb doc=\"book.pdf\" chunk_id=\"chunk-1\" kb_id=\"kb-1\" />"
+
+	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
+		t.Fatalf("normalized translated caption = %q, want %q", got, want)
+	}
+}
+
 func TestNormalizeFeishuImageCaptionSpacing_PreservesStructuralBoundaries(t *testing.T) {
 	tests := []struct {
 		name     string

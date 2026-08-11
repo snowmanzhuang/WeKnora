@@ -570,6 +570,7 @@ import {
 import { useChatResourcesStore } from '@/stores/chatResources';
 import type { IMChannel } from '@/api/agent';
 import { useAuthStore } from '@/stores/auth';
+import { compareNumberedNames, sortByNumberedName } from '@/utils/numbered-name-sort';
 import SettingDrawer from '@/components/settings/SettingDrawer.vue';
 import IntegrationsAgentFilter from '@/components/IntegrationsAgentFilter.vue';
 import wecomLogo from '@/assets/img/im/wecom.svg';
@@ -613,8 +614,10 @@ const agentOptions = computed(() =>
 const allChannels = ref<Array<IMChannel | IMChannelOverview>>([]);
 const channels = computed(() => {
   const filter = filterAgentId.value?.trim();
-  if (!filter) return allChannels.value;
-  return allChannels.value.filter((channel) => channel.agent_id === filter);
+  const visibleChannels = filter
+    ? allChannels.value.filter((channel) => channel.agent_id === filter)
+    : allChannels.value;
+  return [...visibleChannels].sort((a, b) => compareNumberedNames(a.name, b.name));
 });
 const loading = ref(false);
 const saving = ref(false);
@@ -894,7 +897,7 @@ async function loadChannels() {
       chatResources.ensureKnowledgeBases(),
     ]);
     allChannels.value = channelRes.data || [];
-    agents.value = agentRes?.data || [];
+    agents.value = sortByNumberedName(agentRes?.data || [], (agent) => agent.name);
     knowledgeBases.value = chatResources.rawKnowledgeBases.map((kb: any) => ({ id: kb.id, name: kb.name }));
   } catch {
     allChannels.value = [];

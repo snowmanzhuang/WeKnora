@@ -1,0 +1,119 @@
+-- Production-safe prebuild for the 3072-dimensional embeddings HNSW index.
+--
+-- Run this with psql while WeKnora remains online, before the application is
+-- restarted into migration 000075:
+--
+--   psql "$DATABASE_URL" -f scripts/postgres/create_embeddings_hnsw_3072.psql
+--
+-- Docker example (script copied or piped into the PostgreSQL container):
+--
+--   psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+--     -f /path/to/create_embeddings_hnsw_3072.psql
+--
+-- CREATE INDEX CONCURRENTLY avoids blocking normal INSERT/UPDATE/DELETE for
+-- the duration of this potentially long build. It performs more work than a
+-- regular CREATE INDEX and still consumes substantial CPU, I/O, memory and
+-- disk. Keep the database dump and confirm free disk space before running it.
+
+\set ON_ERROR_STOP on
+\pset pager off
+
+SELECT to_regclass('public.embeddings') IS NOT NULL AS embeddings_exists
+\gset hnsw_
+
+\if :hnsw_embeddings_exists
+\else
+    \echo 'ERROR: public.embeddings does not exist; nothing was changed.'
+    \quit 3
+\endif
+
+SELECT extversion AS pgvector_version
+FROM pg_extension
+WHERE extname = 'vector';
+
+SELECT dimension, count(*) AS row_count
+FROM public.embeddings
+GROUP BY dimension
+ORDER BY dimension;
+
+-- A failed concurrent build may leave an INVALID index. Such an index is not
+-- usable, and IF NOT EXISTS would otherwise silently preserve it. Drop only
+-- the known invalid/unfinished target before retrying.
+SELECT format('DROP INDEX CONCURRENTLY IF EXISTS %I.%I;', ns.nspname, cls.relname)
+FROM pg_class AS cls
+JOIN pg_namespace AS ns ON ns.oid = cls.relnamespace
+JOIN pg_index AS i ON i.indexrelid = cls.oid
+WHERE ns.nspname = 'public'
+  AND cls.relname = 'embeddings_embedding_idx_3072'
+  AND (NOT i.indisvalid OR NOT i.indisready)
+\gexec
+
+-- Accept an already-valid index even if an operator chose a different name,
+-- as long as its expression, operator class and partial predicate match the
+-- application query exactly.
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_index AS i
+    WHERE i.indrelid = 'public.embeddings'::regclass
+      AND i.indisvalid
+      AND i.indisready
+      AND pg_get_indexdef(i.indexrelid) LIKE '%embedding)::halfvec(3072)%'
+      AND pg_get_indexdef(i.indexrelid) LIKE '%halfvec_cosine_ops%'
+      AND pg_get_expr(i.indpred, i.indrelid) = '(dimension = 3072)'
+) AS valid_index_exists
+\gset hnsw_
+
+\if :hnsw_valid_index_exists
+    \echo 'A valid matching 3072-dimensional HNSW index already exists; no build needed.'
+\else
+    -- Refuse to let IF NOT EXISTS mask a valid but wrongly-defined relation
+    -- that occupies the intended name.
+    SELECT to_regclass('public.embeddings_embedding_idx_3072') IS NOT NULL AS target_name_conflict
+    \gset hnsw_
+
+    \if :hnsw_target_name_conflict
+        \echo 'ERROR: embeddings_embedding_idx_3072 exists but does not match the required definition.'
+        \echo 'Inspect or rename/drop that index manually; nothing was changed.'
+        \quit 4
+    \endif
+
+    \echo 'Building embeddings_embedding_idx_3072 concurrently. This may take a long time...'
+    CREATE INDEX CONCURRENTLY embeddings_embedding_idx_3072
+        ON public.embeddings
+        USING hnsw (((embedding)::halfvec(3072)) halfvec_cosine_ops)
+        WITH (m = 16, ef_construction = 64)
+        WHERE (dimension = 3072);
+\endif
+
+-- Fail the script unless the finished index is both ready and valid and its
+-- definition still matches the retriever query.
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_index AS i
+    WHERE i.indrelid = 'public.embeddings'::regclass
+      AND i.indisvalid
+      AND i.indisready
+      AND pg_get_indexdef(i.indexrelid) LIKE '%embedding)::halfvec(3072)%'
+      AND pg_get_indexdef(i.indexrelid) LIKE '%halfvec_cosine_ops%'
+      AND pg_get_expr(i.indpred, i.indrelid) = '(dimension = 3072)'
+) AS build_verified
+\gset hnsw_
+
+\if :hnsw_build_verified
+    SELECT i.indexrelid::regclass AS index_name,
+           i.indisready,
+           i.indisvalid,
+           pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,
+           pg_get_indexdef(i.indexrelid) AS index_definition
+    FROM pg_index AS i
+    WHERE i.indrelid = 'public.embeddings'::regclass
+      AND i.indisvalid
+      AND i.indisready
+      AND pg_get_indexdef(i.indexrelid) LIKE '%embedding)::halfvec(3072)%'
+      AND pg_get_indexdef(i.indexrelid) LIKE '%halfvec_cosine_ops%'
+      AND pg_get_expr(i.indpred, i.indrelid) = '(dimension = 3072)';
+    \echo '3072-dimensional HNSW index is ready.'
+\else
+    \echo 'ERROR: the 3072-dimensional HNSW index was not verified.'
+    \quit 5
+\endif

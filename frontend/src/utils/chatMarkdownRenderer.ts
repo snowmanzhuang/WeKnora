@@ -112,6 +112,24 @@ export function normalizeFullwidthMarkdownImageParentheses(content: string): str
   return parts.join('')
 }
 
+const IMAGE_BOLD_CAPTION_BLANK_LINES_RE =
+  /^([ \t]*!\[[^\n]*\]\([^\n]+\)[ \t]*)\r?\n(?:[ \t]*\r?\n)+(?=[ \t]*\*\*\S)/gm
+
+/**
+ * Repair model output that inserts blank Markdown lines between an image and
+ * the required bold caption below it. One source newline is retained so the
+ * renderer can recognize the pair; completed code spans/fences are untouched.
+ */
+export function normalizeImageCaptionMarkdownSpacing(content: string): string {
+  if (!content || !content.includes('![') || !content.includes('**')) return content
+
+  const parts = content.split(COMPLETE_MARKDOWN_CODE_RE)
+  for (let i = 0; i < parts.length; i += 2) {
+    parts[i] = parts[i].replace(IMAGE_BOLD_CAPTION_BLANK_LINES_RE, '$1\n')
+  }
+  return parts.join('')
+}
+
 function legacyImageField(body: string, pattern: RegExp): string {
   const value = body.match(pattern)?.[1] || ''
   return value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
@@ -485,7 +503,8 @@ export function renderChatMarkdown(rawMarkdown: unknown, options: RenderChatMark
   const citationSafeText = stripIncompleteCitationTag(imageContextSafeText)
   const { text: tagSafe, tags } = preserveCitationTags(citationSafeText)
   const normalizedImageMarkdown = normalizeFullwidthMarkdownImageParentheses(tagSafe)
-  const imageSafe = replaceIncompleteImageWithPlaceholder(normalizedImageMarkdown)
+  const compactImageCaptionMarkdown = normalizeImageCaptionMarkdownSpacing(normalizedImageMarkdown)
+  const imageSafe = replaceIncompleteImageWithPlaceholder(compactImageCaptionMarkdown)
   const mathSafe = preprocessMathDelimiters(imageSafe)
   const restoredTags = restoreCitationTags(mathSafe, tags)
   const inlineTags = joinCitationTagsToPreviousLine(restoredTags)

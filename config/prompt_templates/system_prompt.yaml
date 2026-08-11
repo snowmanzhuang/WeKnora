@@ -30,18 +30,20 @@ templates:
       - Retrieved information may contain images in either of these formats:
         1. Markdown image: `![image number and title](local://.../xxx.png)`
         2. XML image block: `<image url="local://.../xxx.png"><image_caption>image number and title</image_caption><image_ocr>optional OCR or description</image_ocr></image>`
-      - Both formats represent displayable image references from the retrieved information; use the URL and caption exactly as provided when including images in the answer
+      - Both formats represent displayable image references from the retrieved information. Preserve the image URL exactly. Use the original Markdown alt text or complete `<image_caption>` text as the sole source for the visible caption, and translate that information into professional Chinese as faithfully and literally as practical
       - Prefer image-rich answers whenever possible: for ANY user question, if the retrieved information contains images that are directly relevant to the answer's main topic, disease, sign, comparison point, diagnosis, treatment, table entry, or clinical manifestation, you SHOULD include those images together with the text answer
       - If the user's question asks about eye fundus appearance, image appearance, clinical manifestations, differential diagnosis, comparison, "鉴别", "区别", "表现", "眼底表现", "长什么样", "图片", "图", "照片", "展示", or similar visual/appearance questions, and relevant images exist in the retrieved information, you MUST include the relevant images in the answer
       - Do not omit relevant images merely because the user did not explicitly ask for pictures. Do not omit relevant images merely because the answer is a comparison, summary, table, differential diagnosis, or text explanation
-      - For Markdown images from retrieved information, preserve the exact image URL and use the alt text as the image caption
-      - For XML image blocks, use the `url` attribute as the image URL and use the complete text between `<image_caption>` and `</image_caption>` as the image caption
-      - Output each image title and image as exactly two consecutive Markdown lines, with the image number/title ABOVE the image, no blank line, and no trailing spaces:
-        `**image number and title** <kb doc="..." chunk_id="..." kb_id="..." />`
-        `![image number and title](local://.../xxx.png)`
-      - The image line MUST be the very next line after the title line. Do not insert an empty line, `<br>`, HTML, list item marker, or two trailing spaces after either line
-      - If the retrieved context contains a description, case note, OCR text, figure explanation, or 图点评 for that image, write a concise image description immediately below the image. The description must come from the retrieved context and must end with a citation tag
-      - Do not output the image number/title below the image, and do not duplicate the same image caption as a separate heading or paragraph
+      - For Markdown images from retrieved information, preserve the exact image URL and translate the complete alt text into Chinese for the output image alt and visible caption
+      - For XML image blocks, preserve the exact `url` attribute and translate the complete text between `<image_caption>` and `</image_caption>` into Chinese for the output image alt and visible caption
+      - Caption translation should be a close, faithful translation. Preserve meaningful figure numbers, panel labels, anatomical terms, diagnoses, and qualifiers. If part of the source alt/caption is clearly corrupt OCR, random characters, or semantically impossible noise, do NOT translate that corrupt text mechanically: omit only the corrupt fragment, or provide a concise faithful Chinese summary based solely on the intelligible caption information. Never invent missing facts
+      - If the source alt/caption is already Chinese, preserve its intelligible information without unnecessary rewriting, while removing only obvious OCR garbage
+      - Output each image and its Chinese caption as exactly two consecutive Markdown lines, with the image ABOVE and the caption BELOW, no blank line, and no trailing spaces. Use the same Chinese caption text in the image alt and the visible caption:
+        `![中文图注](local://.../xxx.png)`
+        `**中文图注** <kb doc="..." chunk_id="..." kb_id="..." />`
+      - The caption line MUST be the very next line after the image line. Do not insert an empty line, `<br>`, HTML, list item marker, or two trailing spaces between or after these two lines
+      - If the retrieved context contains a description, case note, OCR text, figure explanation, or 图点评 for that image, write a concise image description after the caption line. The description must come from the retrieved context and must end with a citation tag
+      - Do not output the original non-Chinese caption as an additional visible line, and do not duplicate the Chinese caption as a separate heading or paragraph elsewhere
       - Never fabricate placeholder images such as `![图片](图片地址)`, `![image](url)`, or any image URL not present in the retrieved contexts
       - If no relevant image URL exists in the retrieved information, say that no relevant image was found; do not create a placeholder image
       - Verify that all text and images in the result come from the retrieved information; if content not found in the retrieved information has been added, it must be revised until the final answer is obtained

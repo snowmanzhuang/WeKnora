@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/common"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -32,7 +33,8 @@ type CompositeRetrieveEngine struct {
 func (c *CompositeRetrieveEngine) Retrieve(ctx context.Context,
 	retrieveParams []types.RetrieveParams,
 ) ([]*types.RetrieveResult, error) {
-	return concurrentRetrieve(ctx, retrieveParams,
+	batchStarted := time.Now()
+	results, err := concurrentRetrieve(ctx, retrieveParams,
 		func(ctx context.Context, param types.RetrieveParams, results *[]*types.RetrieveResult, mu *sync.Mutex) error {
 			found := false
 			for _, engineInfo := range c.engineInfos {
@@ -40,10 +42,24 @@ func (c *CompositeRetrieveEngine) Retrieve(ctx context.Context,
 					continue
 				}
 				if slices.Contains(engineInfo.retrieverType, param.RetrieverType) {
+					stageStarted := time.Now()
 					result, err := engineInfo.retrieveEngine.Retrieve(ctx, param)
+					duration := time.Since(stageStarted)
 					if err != nil {
+						logger.GetLogger(ctx).WithFields(logger.Fields{
+							"retriever_type": param.RetrieverType,
+							"engine_type":    engineInfo.retrieveEngine.EngineType(),
+							"duration_ms":    duration.Milliseconds(),
+						}).WithError(err).Warn("retrieval stage failed")
 						return err
 					}
+					logger.GetLogger(ctx).WithFields(logger.Fields{
+						"retriever_type": param.RetrieverType,
+						"engine_type":    engineInfo.retrieveEngine.EngineType(),
+						"duration_ms":    duration.Milliseconds(),
+						"result_sets":    len(result),
+						"hits":           retrieveHitCount(result),
+					}).Info("retrieval stage completed")
 					mu.Lock()
 					*results = append(*results, result...)
 					mu.Unlock()
@@ -57,6 +73,32 @@ func (c *CompositeRetrieveEngine) Retrieve(ctx context.Context,
 			return nil
 		},
 	)
+	batchLog := logger.GetLogger(ctx).WithFields(logger.Fields{
+		"duration_ms": time.Since(batchStarted).Milliseconds(),
+		"stage_count": len(retrieveParams),
+		"result_sets": len(results),
+		"hits":        retrieveHitCount(results),
+	})
+	if err != nil {
+		batchLog.WithError(err).Warn("concurrent retrieval batch failed")
+	} else {
+		batchLog.Info("concurrent retrieval batch completed")
+	}
+	return results, err
+}
+
+// retrieveHitCount returns the total number of hits contained in one or more
+// retriever result sets. Keeping this separate from len(results) makes the
+// timing log useful: a RetrieveResult represents a stage, not an individual
+// hit.
+func retrieveHitCount(results []*types.RetrieveResult) int {
+	total := 0
+	for _, result := range results {
+		if result != nil {
+			total += len(result.Results)
+		}
+	}
+	return total
 }
 
 // NewCompositeRetrieveEngine creates a new composite retrieve engine with the given parameters

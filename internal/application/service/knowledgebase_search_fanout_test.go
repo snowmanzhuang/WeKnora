@@ -49,6 +49,16 @@ func TestParamsWithTopK_RebuildsFresh(t *testing.T) {
 	assert.Equal(t, "q1", g.BaseParams[0].Query)
 }
 
+func TestEffectiveFusionMatchCount(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 10, effectiveFusionMatchCount(types.SearchParams{MatchCount: 10}))
+	assert.Equal(t, 20, effectiveFusionMatchCount(types.SearchParams{
+		MatchCount:       10,
+		FusionMatchCount: 20,
+	}))
+}
+
 func TestHasMixedEngineTypes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

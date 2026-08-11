@@ -18,7 +18,7 @@
 
 # 构建和依赖文件
 node_modules/
-/dist/
+ /dist/
 /build/
 *.log
 
@@ -59,3 +59,9 @@ fix-docker.sh
 
 # WeChat Mini Program local/private configuration
 miniprogram/project.private.config.json
+
+# 数据库&本地数据
+postgres-data/
+redis-data/
+docreader-tmp/
+data-files/

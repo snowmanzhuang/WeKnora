@@ -120,6 +120,29 @@ test('renderChatMarkdown keeps an immediately following image caption compact', 
   assert.doesNotMatch(html, /<img[^>]+>\s*<br/)
 })
 
+test('renderChatMarkdown removes model-inserted blank lines before a bold caption below an image', () => {
+  const renderer = createChatMarkdownRenderer({
+    imageRenderer: ({ href, text }) => `<img src="${href}" alt="${text}">`,
+    isValidImageUrl: (href) => href.startsWith('resource://'),
+  })
+  const html = renderChatMarkdown(
+    '![图4-2：视网膜改变](resource://AbCdEfGhIjKlMnOpQrStUv)\n\n\n**图4-2：视网膜改变**',
+    {
+      renderer,
+      escapeMarkdown: (text) => text,
+      sanitizeHtml: (value) => value,
+      streaming: false,
+    },
+  )
+
+  assert.match(
+    html,
+    /<p class="md-image-caption-pair"><img[^>]+><strong>图4-2：视网膜改变<\/strong><\/p>/,
+  )
+  assert.doesNotMatch(html, /<img[^>]+>\s*<br/)
+  assert.doesNotMatch(html, /<\/p>\s*<p><strong>图4-2/)
+})
+
 test('markImageCaptionParagraphs leaves standalone images unchanged', () => {
   const html = '<p><img src="resource://image" alt="Figure"></p>'
   assert.equal(markImageCaptionParagraphs(html), html)

@@ -248,11 +248,22 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		return nil, err
 	}
 
-	if len(deduplicatedChunks) > params.MatchCount {
-		deduplicatedChunks = deduplicatedChunks[:params.MatchCount]
+	fusionMatchCount := effectiveFusionMatchCount(params)
+	if len(deduplicatedChunks) > fusionMatchCount {
+		deduplicatedChunks = deduplicatedChunks[:fusionMatchCount]
 	}
 
 	return s.processSearchResults(ctx, deduplicatedChunks, params.SkipContextEnrichment)
+}
+
+// effectiveFusionMatchCount separates the post-fusion result limit from the
+// per-retriever pool size. Existing callers that do not set FusionMatchCount
+// retain the historical MatchCount behavior.
+func effectiveFusionMatchCount(params types.SearchParams) int {
+	if params.FusionMatchCount > 0 {
+		return params.FusionMatchCount
+	}
+	return params.MatchCount
 }
 
 // pickPrimary returns the KB whose ID matches id, or nil if id is not in

@@ -171,6 +171,12 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	// - If only KnowledgeBaseIDs: search entire knowledge bases
 	// - If only KnowledgeIDs: search specific documents
 	// - If both: search specific documents within the knowledge bases (AND)
+	//
+	// Keep these as ordinary PostgreSQL predicates.  The ParadeDB BM25 index
+	// stores ID filters with the literal tokenizer (migration 000076), which
+	// lets pg_search push IN/ANY predicates into the index scan while retaining
+	// exact SQL equality semantics.  Using ParadeDB's === operator against an
+	// older, word-tokenized ID index can silently return no rows for UUIDs.
 	if len(params.KnowledgeBaseIDs) > 0 {
 		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by knowledge base IDs: %v", params.KnowledgeBaseIDs)
 		conds = append(conds, clause.IN{
@@ -200,7 +206,10 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 		Vars: []interface{}{params.Query},
 	})
 
-	// Filter by is_enabled = true or NULL (NULL means enabled for historical data)
+	// Filter by is_enabled = true or NULL (NULL means enabled for historical data).
+	// is_enabled is part of the BM25 index since migration 000076, so ParadeDB
+	// can also push this boolean expression down instead of applying a heap
+	// filter after full-text retrieval.
 	conds = append(conds, clause.Expr{
 		SQL:  "(is_enabled IS NULL OR is_enabled = ?)",
 		Vars: []interface{}{true},
