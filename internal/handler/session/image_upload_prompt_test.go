@@ -43,4 +43,12 @@ func TestOphthalmologyAuxiliaryVLMPromptHasClinicalAndInjectionBoundaries(t *tes
 	jointPrompt := appservice.BuildOphthalmologyAuxiliaryVLMPrompt(5)
 	require.Contains(t, jointPrompt, "当前调用共包含 5 张图片")
 	require.Contains(t, jointPrompt, "【图片1】至【图片5】")
+
+	contextualPrompt := appservice.BuildOphthalmologyAuxiliaryVLMPromptWithUserDescription(
+		5,
+		"患者描述右眼视物变形",
+	)
+	require.Contains(t, contextualPrompt, "患者描述右眼视物变形")
+	require.Contains(t, contextualPrompt, "仅作临床背景")
+	require.Contains(t, contextualPrompt, "不得把仅由文字提供的症状")
 }

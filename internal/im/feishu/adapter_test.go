@@ -424,7 +424,7 @@ func TestBuildStaticCardJSON_ContainsInlineImage(t *testing.T) {
 func TestNormalizeFeishuImageCaptionSpacing(t *testing.T) {
 	longAlt := "Fig. 32 [A] (continued) posterior membrane-like structure"
 	input := "正文\n\n![" + longAlt + "](img_test_inline)\n\n图示病例表现为角膜水肿。\n\n## 下一节"
-	want := "正文\n\n![" + longAlt + "](img_test_inline)图示病例表现为角膜水肿。\n\n## 下一节"
+	want := "正文\n\n![" + longAlt + "](img_test_inline) 图示病例表现为角膜水肿。\n\n## 下一节"
 
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized content = %q, want %q", got, want)
@@ -433,16 +433,16 @@ func TestNormalizeFeishuImageCaptionSpacing(t *testing.T) {
 
 func TestNormalizeFeishuImageCaptionSpacing_RemovesSingleSourceNewline(t *testing.T) {
 	input := "![房角镜图](img_test_inline)\n房角镜下可见正常前房角结构。"
-	want := "![房角镜图](img_test_inline)房角镜下可见正常前房角结构。"
+	want := "![房角镜图](img_test_inline) 房角镜下可见正常前房角结构。"
 
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized content = %q, want %q", got, want)
 	}
 }
 
-func TestNormalizeFeishuImageCaptionSpacing_KeepsTranslatedCaptionBelowImageWithoutGap(t *testing.T) {
+func TestNormalizeFeishuImageCaptionSpacing_SeparatesBoldCaptionWithoutNewline(t *testing.T) {
 	input := "![图4-2：视网膜改变](img_test_inline)\n\n**图4-2：视网膜改变** <kb doc=\"book.pdf\" chunk_id=\"chunk-1\" kb_id=\"kb-1\" />"
-	want := "![图4-2：视网膜改变](img_test_inline)**图4-2：视网膜改变** <kb doc=\"book.pdf\" chunk_id=\"chunk-1\" kb_id=\"kb-1\" />"
+	want := "![图4-2：视网膜改变](img_test_inline) **图4-2：视网膜改变** <kb doc=\"book.pdf\" chunk_id=\"chunk-1\" kb_id=\"kb-1\" />"
 
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized translated caption = %q, want %q", got, want)
@@ -481,7 +481,7 @@ func TestNormalizeFeishuImageCaptionSpacing_LeavesNonFeishuImageUntouched(t *tes
 
 func TestNormalizeFeishuImageCaptionSpacing_HandlesAdjacentImagesIndependently(t *testing.T) {
 	input := "![第一张](img_first)\n\n![第二张](img_second)\n\n第二张的图注"
-	want := "![第一张](img_first)\n\n![第二张](img_second)第二张的图注"
+	want := "![第一张](img_first)\n\n![第二张](img_second) 第二张的图注"
 	if got := normalizeFeishuImageCaptionSpacing(input); got != want {
 		t.Fatalf("normalized content = %q, want %q", got, want)
 	}

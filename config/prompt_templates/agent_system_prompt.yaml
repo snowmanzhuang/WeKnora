@@ -183,14 +183,17 @@ templates:
       *   **Grounded:** Every factual claim must be supported by the retrieved evidence. Source-output formatting is managed by the system.
       *   **Structured:** Clear hierarchy and logic.
       *   **Rich Media (Markdown with Images — REQUIRED):** When any retrieved chunk or tool result contains Markdown images or an "images" field with URLs, treat directly relevant images as relevant by default. Unless the user explicitly requests text-only output or every retrieved image is clearly unrelated, the final answer MUST include at least one relevant image. Place each image immediately after the paragraph or 鉴别方向 it supports; when multiple images support different sections, distribute them across those sections.
-          - 每张图片严格输出连续两行，不要在图片上方另行输出标题：第一行是原始图片 Markdown，第二行是图片说明及其知识库引用。
-          - 对 Markdown 图片，必须完整保留原始 `![alt](url)`，包括原始 alt 和完整 URL；将 alt 的全部正常、可理解内容忠实直译为专业、自然的医学中文，写在图片正下方作为说明。
-          - 对 XML 图片块或工具结果中的结构化图片，使用其原始 URL，并以完整 `image_caption`/`caption` 作为图片 alt；再将该图注忠实直译为专业医学中文，写在图片正下方。
-          - 图号、医学术语、分级代码、数字、单位和文献来源应完整保留；明显的 OCR、排版、编码错误、残缺或无法确定含义的片段应省略，不得猜测补全。
+          - 每张图片严格输出连续两行，不要在图片上方另行输出标题：第一行是带完整中文图注的图片 Markdown，第二行是完全相同的完整中文图注及其知识库引用。
+          - 先从原始 Markdown `alt`、XML `image_caption`/`caption` 或结构化图片字段中确定唯一的“完整中文图注”。完整中文图注必须表达原图注全部正常、可理解的信息，不得概括、缩写、改写、合并或省略任何信息；图注较长也必须完整输出，不得为了简洁而压缩。
+          - 原图注已经是中文时，除纠正明确的 OCR、编码、排版或标点错误外，必须尽量逐字保留；不得用同义改写、医学术语规范化或更简洁的说法替换原文。原图注不是中文时，必须逐项完整翻译成专业、自然的医学中文，不得只翻译主要意思。
+          - 必须完整保留图号、分图标签、眼别、解剖部位、检查或成像类型、时间点、阶段、方向、数值、单位、分级代码、检查所见、诊断、患者信息、文献来源，以及“与图 X 为同一患者”“与前图相同”等跨图关系和其他限定信息。
+          - 对 Markdown 图片，必须原样保留完整 URL，只把 `alt` 替换为上述完整中文图注；对 XML 或结构化图片，必须使用原始 URL，并把完整中文图注作为图片 `alt`。下一行可见图注必须与图片 `alt` 的中文图注文本完全相同，不得再次润色或缩短。
+          - 不得把正文解释、模型推断、上下文补充或原图注没有表达的信息加入图注。需要补充解释时，必须在完整图注之后另起一段，并附支持该解释的知识库引用。
+          - 明显的 OCR、排版、编码错误或确实无法确定含义的片段可以仅修正或省略该错误片段，但不得因此删除同句中的其他可理解信息，也不得猜测补全。
           - 图片行与下方说明之间只能有一个换行符，不得插入空行、`<br>`、HTML、列表项标记或行尾双空格。说明行必须附上支持该图片或图注的知识库引用。
           - 图片 Markdown 必须使用 ASCII 半角括号 `![alt](url)`；绝不能使用全角 `（` 或 `）`。不得修改、缩短、规范化或编造图片 URL，也不得创建占位图片。
           - 只使用已经完成深读、且与当前回答或鉴别方向直接相关的图片。若没有相关图片 URL，应如实说明未找到合适图片，不得用无关图片充数。
-          - 完成回答前，静默检查图片、图注、引用、两行格式和 URL 是否满足上述要求。
+          - 完成回答前，必须将最终中文图注与原始图注逐项静默核对，确认每一项可理解信息都已保留，再检查图片、引用、两行格式和 URL 是否满足上述要求。
 
       ### System Status
       Web Search: {{web_search_status}}

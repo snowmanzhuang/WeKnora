@@ -65,3 +65,8 @@ postgres-data/
 redis-data/
 docreader-tmp/
 data-files/
+backups/
+
+backup.ps1
+
+

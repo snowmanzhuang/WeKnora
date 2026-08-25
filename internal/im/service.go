@@ -37,6 +37,9 @@ const (
 	dedupTTL = 5 * time.Minute
 	// dedupCleanupInterval is how often the dedup map is cleaned.
 	dedupCleanupInterval = 1 * time.Minute
+	// dedupRedisTimeout bounds Redis deduplication independently of the
+	// short-lived callback context supplied by IM platform SDKs.
+	dedupRedisTimeout = 2 * time.Second
 	// maxContentLength is the maximum allowed message content length.
 	maxContentLength = 4096
 	// maxQuoteContentLength is the max runes to include from a quoted message.
@@ -1192,7 +1195,10 @@ func (s *Service) StartChannel(channel *IMChannel) error {
 func (s *Service) startChannelInternal(channel *IMChannel, factory AdapterFactory) error {
 	// Build the message handler that delegates to HandleMessage with this channel's config
 	msgHandler := func(msgCtx context.Context, msg *IncomingMessage) error {
-		return s.HandleMessage(msgCtx, msg, channel.ID)
+		// Long-connection SDKs may cancel their callback context as soon as the
+		// event callback returns. Message processing continues asynchronously, so
+		// preserve context values but detach from that transport lifecycle.
+		return s.HandleMessage(context.WithoutCancel(msgCtx), msg, channel.ID)
 	}
 
 	ctx := context.Background()
@@ -1607,28 +1613,31 @@ func (s *Service) GetChannelByIDAndTenant(channelID string, tenantID uint64) (*I
 // isDuplicate checks if a message has already been processed by this channel.
 //
 // Multi-instance mode (Redis available): uses Redis SetNX for cross-instance
-// deduplication. If Redis fails, returns true (fail-closed) to prevent
-// duplicate processing across instances — a dropped message can be retried
-// by the user, but a duplicate LLM response wastes resources and confuses.
-//
-// Single-instance mode (no Redis): uses a local sync.Map, which is sufficient
-// when only one instance receives messages.
+// deduplication and the local map as a first-level guard. Redis operations are
+// detached from the short-lived IM callback context. If Redis is unavailable,
+// the first delivery proceeds under local deduplication instead of being lost.
+// The local guard also handles same-instance retries when Redis is absent.
 func (s *Service) isDuplicate(ctx context.Context, channelID, messageID string) bool {
 	dedupID := channelID + ":" + messageID
+	_, localDuplicate := s.processedMsgs.LoadOrStore(dedupID, time.Now())
+	if localDuplicate {
+		return true
+	}
 	if s.redis != nil {
 		key := RedisKeyDedup + dedupID
-		ok, err := s.redis.SetNX(ctx, key, "1", dedupTTL).Result()
+		redisCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dedupRedisTimeout)
+		defer cancel()
+		ok, err := s.redis.SetNX(redisCtx, key, "1", dedupTTL).Result()
 		if err == nil {
 			return !ok // SetNX returns true when key was newly set (not a duplicate)
 		}
-		// Redis is configured but failed — fail-closed to avoid cross-instance
-		// duplicate processing. The user can simply resend the message.
-		logger.Errorf(ctx, "[IM] Redis dedup failed (fail-closed, message dropped): %v", err)
-		return true
+		// Prefer preserving the user message over cross-instance deduplication
+		// during a Redis outage. The local guard still prevents local retries.
+		logger.Warnf(context.WithoutCancel(ctx),
+			"[IM] Redis dedup failed; accepting message with local dedup fallback: %v", err)
+		return false
 	}
-	// Single-instance mode: local dedup is sufficient.
-	_, loaded := s.processedMsgs.LoadOrStore(dedupID, time.Now())
-	return loaded
+	return false
 }
 
 // HandleMessage processes an incoming IM message end-to-end using channel config.
@@ -1877,6 +1886,12 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 	sessionCtx = types.WithChannelSessionReadAccess(sessionCtx, session.ID)
 	channelKBIDs := channelKnowledgeBaseIDs(channel)
 	s.persistIMLastRequestState(sessionCtx, session.ID, agentID, customAgent, channelKBIDs)
+	qaAgent, forcedImageAgent := agentForKnowledgeImageRequest(channel, msg, customAgent)
+	if forcedImageAgent {
+		logger.Infof(ctx,
+			"[IM] Numbered Feishu image request routed to request-local agent retrieval: channel=%s message=%s",
+			channelID, msg.MessageID)
+	}
 
 	// 5. Enqueue the QA request into the bounded worker pool.
 	// The worker pool controls LLM concurrency and provides backpressure.
@@ -1888,7 +1903,7 @@ func (s *Service) HandleMessage(ctx context.Context, msg *IncomingMessage, chann
 		cancel:           qaCancel,
 		msg:              msg,
 		session:          session,
-		agent:            customAgent,
+		agent:            qaAgent,
 		adapter:          adapter,
 		channel:          channel,
 		channelID:        channelID,

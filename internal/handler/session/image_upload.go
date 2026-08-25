@@ -88,6 +88,7 @@ func (h *Handler) analyzeOphthalmologyImageAttachments(
 	ctx context.Context,
 	images []ImageAttachment,
 	vlmModelID string,
+	userQuery string,
 ) int {
 	if len(images) == 0 || vlmModelID == "" {
 		return 0
@@ -117,7 +118,10 @@ func (h *Handler) analyzeOphthalmologyImageAttachments(
 	analysis, analysisErr := vlmModel.Predict(
 		ctx,
 		imageBytesList,
-		appservice.BuildOphthalmologyAuxiliaryVLMPrompt(len(imageBytesList)),
+		appservice.BuildOphthalmologyAuxiliaryVLMPromptWithUserDescription(
+			len(imageBytesList),
+			userQuery,
+		),
 	)
 	if analysisErr != nil {
 		logger.Warnf(ctx, "Joint VLM analysis failed for %d image(s): %v", len(imageBytesList), analysisErr)

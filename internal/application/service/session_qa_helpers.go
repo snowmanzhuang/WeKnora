@@ -209,7 +209,11 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 		cm.SummaryConfig.Temperature = customAgent.Config.Temperature
 		logger.Infof(ctx, "Using custom agent's temperature: %f", customAgent.Config.Temperature)
 	}
-	if customAgent.Config.MaxCompletionTokens > 0 {
+	if customAgent.Config.DisableCompletionTokenLimit {
+		cm.SummaryConfig.MaxCompletionTokens = 0
+		cm.SummaryConfig.MaxTokens = 0
+		logger.Infof(ctx, "Custom agent disables WeKnora completion-token limit")
+	} else if customAgent.Config.MaxCompletionTokens > 0 {
 		cm.SummaryConfig.MaxCompletionTokens = customAgent.Config.MaxCompletionTokens
 		logger.Infof(ctx, "Using custom agent's max_completion_tokens: %d", customAgent.Config.MaxCompletionTokens)
 	}

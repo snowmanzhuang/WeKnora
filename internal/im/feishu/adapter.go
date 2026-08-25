@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/im"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -601,6 +602,20 @@ func parsePostMessageContent(raw string) (string, []im.IncomingImage, error) {
 // type), we retry once via the plain "send message" API so the reply still
 // reaches the user.
 func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, reply *im.ReplyMessage) error {
+	parts := splitFeishuCardMarkdown(reply.Content, feishuCardMarkdownSafeBytes-feishuCardPartHeaderReserve)
+	if len(parts) <= 1 {
+		return a.sendSingleReply(ctx, incoming, reply.Content)
+	}
+	for i, part := range parts {
+		if err := a.sendSingleReply(ctx, incoming, feishuCardPartContent(part, i+1, len(parts))); err != nil {
+			return fmt.Errorf("send answer card part %d/%d: %w", i+1, len(parts), err)
+		}
+	}
+	logger.Infof(ctx, "[%s] Long non-stream answer split into %d cards", a.region.Label, len(parts))
+	return nil
+}
+
+func (a *Adapter) sendSingleReply(ctx context.Context, incoming *im.IncomingMessage, content string) error {
 	accessToken, err := a.getTenantAccessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
@@ -608,7 +623,7 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 
 	// CardKit markdown does not render LaTeX delimiters. Downgrade only complete
 	// math spans at the Feishu/Lark boundary; all non-math content is preserved.
-	replyContent := normalizeFeishuMarkdownCompatibility(reply.Content)
+	replyContent := normalizeFeishuMarkdownCompatibility(content)
 	replyContent = a.resolveMarkdownImages(ctx, accessToken, replyContent)
 	replyContent = normalizeFeishuImageCaptionSpacing(replyContent)
 	if shouldUseFeishuStaticCard(replyContent) {
@@ -626,12 +641,12 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	}
 
 	// Build text message content
-	content, _ := json.Marshal(map[string]string{"text": replyContent})
+	textPayload, _ := json.Marshal(map[string]string{"text": replyContent})
 
 	// Reply payload (no receive_id — the path message_id locates the chat)
 	replyPayload := map[string]interface{}{
 		"msg_type": "text",
-		"content":  string(content),
+		"content":  string(textPayload),
 	}
 
 	// Fallback payload (plain send-message API) — needs receive_id
@@ -639,7 +654,7 @@ func (a *Adapter) SendReply(ctx context.Context, incoming *im.IncomingMessage, r
 	fallbackPayload := map[string]interface{}{
 		"receive_id": receiveID,
 		"msg_type":   "text",
-		"content":    string(content),
+		"content":    string(textPayload),
 	}
 
 	return a.sendWithFallback(ctx, accessToken, incoming, replyPayload, fallbackPayload, receiveIDType)
@@ -843,6 +858,12 @@ func (a *Adapter) DownloadFile(ctx context.Context, msg *im.IncomingMessage) (io
 const (
 	// streamingElementID is the element_id used in the card JSON for streaming content.
 	streamingElementID = "streaming_content"
+	// feishuCardMarkdownSafeBytes keeps each Markdown element comfortably below
+	// CardKit's payload ceiling. Long answers are split only at structural text
+	// boundaries and sent as ordered cards; model generation is not constrained
+	// by this transport-specific budget.
+	feishuCardMarkdownSafeBytes = 18_000
+	feishuCardPartHeaderReserve = 64
 )
 
 // feishuStreamState tracks per-stream accumulated content.
@@ -1007,6 +1028,16 @@ func (a *Adapter) UpdateStreamContent(ctx context.Context, incoming *im.Incoming
 	if fullContent == "" {
 		return nil
 	}
+	parts := splitFeishuCardMarkdown(fullContent, feishuCardMarkdownSafeBytes-feishuCardPartHeaderReserve)
+	if len(parts) > 1 {
+		fullContent = strings.TrimRight(parts[0], "\r\n") + "\n\n_内容仍在生成，完成后将自动拆分为多张卡片。_"
+	}
+	return a.updateSingleStreamContent(ctx, streamID, fullContent)
+}
+
+// updateSingleStreamContent updates the one CardKit element backing a live
+// stream. Capacity handling belongs to the public update/finalize methods.
+func (a *Adapter) updateSingleStreamContent(ctx context.Context, streamID string, fullContent string) error {
 
 	feishuStreamsMu.Lock()
 	state, ok := feishuStreams[streamID]
@@ -1040,9 +1071,151 @@ func (a *Adapter) UpdateStreamContent(ctx context.Context, incoming *im.Incoming
 	return a.cardkitUpdateElement(ctx, accessToken, streamID, streamingElementID, content, seq)
 }
 
-// FinalizeStream replaces the card with answer-only content.
+// FinalizeStream replaces the streaming card with the first answer part and
+// sends any remaining parts as ordered cards. This is intentionally confined
+// to Feishu/Lark; the stored answer and every other output channel are left
+// untouched.
 func (a *Adapter) FinalizeStream(ctx context.Context, incoming *im.IncomingMessage, streamID string, finalContent string) error {
-	return a.UpdateStreamContent(ctx, incoming, streamID, finalContent)
+	parts := splitFeishuCardMarkdown(finalContent, feishuCardMarkdownSafeBytes-feishuCardPartHeaderReserve)
+	if len(parts) <= 1 {
+		return a.updateSingleStreamContent(ctx, streamID, finalContent)
+	}
+
+	for i, part := range parts {
+		part = feishuCardPartContent(part, i+1, len(parts))
+		if i == 0 {
+			if err := a.updateSingleStreamContent(ctx, streamID, part); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := a.sendSingleReply(ctx, incoming, part); err != nil {
+			return fmt.Errorf("send answer card part %d/%d: %w", i+1, len(parts), err)
+		}
+	}
+	logger.Infof(ctx, "[%s] Long answer split into %d cards", a.region.Label, len(parts))
+	return nil
+}
+
+func feishuCardPartContent(content string, part, total int) string {
+	return fmt.Sprintf("**第 %d/%d 部分**\n\n%s", part, total, strings.TrimSpace(content))
+}
+
+// splitFeishuCardMarkdown packs complete Markdown blocks into bounded parts.
+// Blank-line boundaries outside fenced code are preferred; an unusually long
+// prose block falls back to whole lines and then sentence boundaries. A fenced
+// code block is kept intact even when it exceeds the target because splitting
+// it would corrupt the Markdown semantics.
+func splitFeishuCardMarkdown(content string, maxBytes int) []string {
+	if content == "" || maxBytes <= 0 || len(content) <= maxBytes {
+		return []string{content}
+	}
+
+	blocks := feishuMarkdownBlocks(content)
+	parts := make([]string, 0, len(blocks)/2+1)
+	var current strings.Builder
+	flush := func() {
+		if current.Len() == 0 {
+			return
+		}
+		parts = append(parts, current.String())
+		current.Reset()
+	}
+
+	for _, block := range blocks {
+		units := []string{block}
+		if len(block) > maxBytes && !feishuIsFencedBlock(block) {
+			units = splitFeishuLongMarkdownBlock(block, maxBytes)
+		}
+		for _, unit := range units {
+			if current.Len() > 0 && current.Len()+len(unit) > maxBytes {
+				flush()
+			}
+			current.WriteString(unit)
+		}
+	}
+	flush()
+	if len(parts) == 0 {
+		return []string{content}
+	}
+	return parts
+}
+
+func feishuMarkdownBlocks(content string) []string {
+	blocks := make([]string, 0, strings.Count(content, "\n\n")+1)
+	start := 0
+	inFence := false
+	for i := 0; i < len(content); {
+		lineEnd := strings.IndexByte(content[i:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(content)
+		} else {
+			lineEnd += i + 1
+		}
+		line := strings.TrimSpace(strings.TrimSuffix(content[i:lineEnd], "\n"))
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			inFence = !inFence
+		}
+		if !inFence && lineEnd < len(content) && content[lineEnd] == '\n' {
+			blocks = append(blocks, content[start:lineEnd+1])
+			start = lineEnd + 1
+		}
+		i = lineEnd
+	}
+	if start < len(content) {
+		blocks = append(blocks, content[start:])
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, content)
+	}
+	return blocks
+}
+
+func feishuIsFencedBlock(block string) bool {
+	trimmed := strings.TrimSpace(block)
+	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+}
+
+func splitFeishuLongMarkdownBlock(block string, maxBytes int) []string {
+	var units []string
+	start := 0
+	for start < len(block) {
+		remaining := block[start:]
+		if len(remaining) <= maxBytes {
+			units = append(units, remaining)
+			break
+		}
+		cut := feishuSafeMarkdownCut(remaining, maxBytes)
+		if cut <= 0 {
+			// No safe syntax boundary exists before the target. Keep the atomic
+			// block intact instead of cutting a link/emphasis/code construct.
+			units = append(units, remaining)
+			break
+		}
+		units = append(units, remaining[:cut])
+		start += cut
+	}
+	return units
+}
+
+func feishuSafeMarkdownCut(content string, maxBytes int) int {
+	if len(content) <= maxBytes {
+		return len(content)
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(content[cut]) {
+		cut--
+	}
+	window := content[:cut]
+	if idx := strings.LastIndexByte(window, '\n'); idx >= 0 {
+		return idx + 1
+	}
+	for _, punctuation := range []string{"。", "！", "？", "; ", ". ", "! ", "? ", "；"} {
+		if idx := strings.LastIndex(window, punctuation); idx >= 0 {
+			return idx + len(punctuation)
+		}
+	}
+	return 0
 }
 
 // SendStreamChunk is an alias for UpdateStreamContent.
@@ -1231,9 +1404,11 @@ var (
 //
 //	![image](img_key)\n\ncaption
 //
-// into ![image](img_key)caption with no source newline between the image and
-// caption. Feishu's CardKit renders the image itself as a block, while even one
-// source newline adds visible vertical space below it.
+// into ![image](img_key) caption with a single inline separator between the
+// image and caption. Feishu's CardKit renders the image itself as a block, while
+// even one source newline adds visible vertical space below it. The separator
+// also prevents the caption's Markdown syntax from being parsed as part of the
+// image token.
 // This function is called only by the Feishu/Lark adapter, so stored answers,
 // web rendering, and other IM platforms remain unchanged.
 func normalizeFeishuImageCaptionSpacing(content string) string {
@@ -1265,7 +1440,7 @@ func normalizeFeishuImageCaptionSpacing(content string) string {
 		}
 
 		imageLine := strings.TrimRight(lines[i], " \t\r")
-		result = append(result, imageLine+nextLine)
+		result = append(result, imageLine+" "+nextLine)
 		i = next
 		changed = true
 	}

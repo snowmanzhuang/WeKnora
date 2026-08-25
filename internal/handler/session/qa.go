@@ -1048,6 +1048,7 @@ func (h *Handler) runVLMAnalysisIfNeeded(streamCtx *sseStreamContext, reqCtx *qa
 			streamCtx.asyncCtx,
 			reqCtx.images,
 			reqCtx.customAgent.Config.VLMModelID,
+			reqCtx.query,
 		)
 	} else {
 		analyzedCount = h.analyzeImageAttachments(

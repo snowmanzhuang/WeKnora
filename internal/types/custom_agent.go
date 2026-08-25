@@ -125,6 +125,11 @@ type CustomAgentConfig struct {
 	Temperature float64 `yaml:"temperature" json:"temperature"`
 	// Maximum completion tokens (only for normal mode)
 	MaxCompletionTokens int `yaml:"max_completion_tokens" json:"max_completion_tokens"`
+	// DisableCompletionTokenLimit omits WeKnora's completion-token limit from
+	// model requests. The upstream provider remains free to enforce its own
+	// limits. This is explicit so legacy agents with a zero value retain the
+	// historical 2048-token default.
+	DisableCompletionTokenLimit bool `yaml:"disable_completion_token_limit" json:"disable_completion_token_limit,omitempty"`
 	// Whether to enable thinking mode (for models that support extended thinking)
 	Thinking *bool `yaml:"thinking" json:"thinking"`
 	// Whether final answers include knowledge/web source citations. Nil defaults to true
@@ -528,7 +533,7 @@ func (a *CustomAgent) EnsureDefaults() {
 	if a.Config.FallbackStrategy == "" {
 		a.Config.FallbackStrategy = "model"
 	}
-	if a.Config.MaxCompletionTokens == 0 {
+	if !a.Config.DisableCompletionTokenLimit && a.Config.MaxCompletionTokens == 0 {
 		a.Config.MaxCompletionTokens = 2048
 	}
 	// Agent mode should always enable multi-turn conversation

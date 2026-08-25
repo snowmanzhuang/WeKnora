@@ -54,3 +54,17 @@ func TestEnsureDefaults_CitationsDefaultEnabledAndPreserveFalse(t *testing.T) {
 		t.Fatal("EnsureDefaults must preserve explicit citation_enabled=false")
 	}
 }
+
+func TestEnsureDefaults_CompletionTokenLimitCanBeExplicitlyOmitted(t *testing.T) {
+	legacy := &CustomAgent{Config: CustomAgentConfig{}}
+	legacy.EnsureDefaults()
+	if legacy.Config.MaxCompletionTokens != 2048 {
+		t.Fatalf("legacy max_completion_tokens = %d, want 2048", legacy.Config.MaxCompletionTokens)
+	}
+
+	unlimited := &CustomAgent{Config: CustomAgentConfig{DisableCompletionTokenLimit: true}}
+	unlimited.EnsureDefaults()
+	if unlimited.Config.MaxCompletionTokens != 0 {
+		t.Fatalf("explicitly omitted max_completion_tokens = %d, want 0", unlimited.Config.MaxCompletionTokens)
+	}
+}

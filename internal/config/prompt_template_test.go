@@ -112,7 +112,11 @@ func TestProgressiveRAGPromptPreservesToolSyntaxAndAddsOphthalmologyRules(t *tes
 		"优先与用户原图保持相同检查模态和解剖部位",
 		"Rich Media (Markdown with Images — REQUIRED)",
 		"每张图片严格输出连续两行",
-		"将 alt 的全部正常、可理解内容忠实直译",
+		"不得概括、缩写、改写、合并或省略任何信息",
+		"与图 X 为同一患者",
+		"下一行可见图注必须与图片 `alt` 的中文图注文本完全相同",
+		"不得把正文解释、模型推断、上下文补充或原图注没有表达的信息加入图注",
+		"与原始图注逐项静默核对",
 	}
 	for _, rule := range requiredRules {
 		if !strings.Contains(progressive.Content, rule) {
