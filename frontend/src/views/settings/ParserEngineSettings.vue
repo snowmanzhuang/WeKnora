@@ -467,7 +467,7 @@ const needsTestButton = computed(() => {
 /** 固定展示顺序，未列出的引擎排在末尾按名称排序 */
 const ENGINE_ORDER: Record<string, number> = {
   builtin: 0,
-  weknoracloud: 1,
+  // weknoracloud: 1,
   simple: 2,
   markitdown: 3,
   mineru: 4,

@@ -3,7 +3,7 @@
     <header class="landing-hero" :class="{ 'landing-hero--claw': variant === 'claw' }">
       <div class="landing-hero__content">
         <h2 class="landing-hero__title">{{ title }}</h2>
-        <p v-if="subtitle" class="landing-hero__subtitle">{{ subtitle }}</p>
+        <!-- <p v-if="subtitle" class="landing-hero__subtitle">{{ subtitle }}</p> -->
         <div v-if="$slots.tags" class="landing-hero__tags">
           <slot name="tags" />
         </div>

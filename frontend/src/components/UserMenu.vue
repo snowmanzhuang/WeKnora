@@ -513,7 +513,7 @@ const reopenGuide = () => {
 // 打开 GitHub
 const openGithub = () => {
   menuVisible.value = false
-  window.open('https://github.com/Tencent/WeKnora', '_blank')
+  window.open('https://github.com/snowmanzhuang/WeKnora', '_blank')
 }
 
 // 注销

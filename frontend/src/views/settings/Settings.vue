@@ -383,7 +383,8 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'models_runtime',
       label: t('settings.navGroups.modelsRuntime'),
-      items: pickItems(['models', 'ollama', 'weknoracloud']),
+      // items: pickItems(['models', 'ollama', 'weknoracloud']),
+      items: pickItems(['models', 'ollama']),
     },
     {
       key: 'integrations',
@@ -412,11 +413,11 @@ const navGroups = computed<NavGroup[]>(() => {
       label: t('settings.navGroups.systemAdministration'),
       items: pickItems(['system-global', 'runtime-queues', 'platform-api-keys', 'system-audit-log']),
     },
-    {
-      key: 'platform',
-      label: t('settings.navGroups.platform'),
-      items: pickItems(['system']),
-    },
+    // {
+    //   key: 'platform',
+    //   label: t('settings.navGroups.platform'),
+    //   items: pickItems(['system']),
+    // },
   ].filter((group) => group.items.length > 0)
 })
 
